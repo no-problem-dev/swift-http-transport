@@ -68,14 +68,14 @@ public struct ExponentialBackoff: RetryPolicy {
 ///
 /// Centralises retry in one place (the transport layer), removing per-provider
 /// retry loops. The `sleep` is injectable for deterministic tests.
-public struct RetryingTransport<Base: HTTPTransport>: HTTPTransport {
-    public let base: Base
+public struct RetryingTransport: HTTPTransport {
+    public let base: any HTTPTransport
     public let policy: any RetryPolicy
     public let rateLimitMapping: RateLimitHeaderMapping?
     private let sleep: @Sendable (TimeInterval) async throws -> Void
 
     public init(
-        base: Base,
+        base: any HTTPTransport,
         policy: any RetryPolicy,
         rateLimitMapping: RateLimitHeaderMapping? = nil,
         sleep: @escaping @Sendable (TimeInterval) async throws -> Void = { try await Task.sleep(nanoseconds: UInt64($0 * 1_000_000_000)) }
