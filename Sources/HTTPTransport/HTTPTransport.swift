@@ -16,7 +16,9 @@ public protocol HTTPStreamingTransport: Sendable {
 
 /// `URLSession`-backed transport. The default concrete implementation.
 public struct URLSessionTransport: HTTPTransport, HTTPStreamingTransport {
+    /// The underlying `URLSession` used for all requests.
     public let session: URLSession
+    /// Timeout applied to requests that do not specify their own ``HTTPRequest/timeout``.
     public var defaultTimeout: TimeInterval
 
     public init(session: URLSession = .shared, defaultTimeout: TimeInterval = 60) {

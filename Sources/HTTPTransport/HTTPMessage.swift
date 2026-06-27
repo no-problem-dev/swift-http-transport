@@ -65,12 +65,16 @@ public struct HTTPResponse: Sendable {
         self.body = body
     }
 
+    /// `true` when the HTTP status code is in the 2xx success range.
     public var isSuccess: Bool { (200..<300).contains(status) }
 }
 
 /// Errors surfaced by transports before any HTTP exchange completes.
 public enum TransportError: Error, Sendable {
+    /// The response object could not be interpreted as an `HTTPURLResponse`.
     case invalidResponse
+    /// A network-layer error (connection refused, DNS failure, etc.).
     case network(any Error)
+    /// The task was cancelled before a response was received.
     case cancelled
 }

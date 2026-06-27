@@ -2,9 +2,14 @@ import Foundation
 
 /// A decoded Server-Sent Events frame (WHATWG `text/event-stream`).
 public struct SSEEvent: Sendable, Equatable {
+    /// Named event type, or `nil` for the default `"message"` event.
     public var event: String?
+    /// The event payload, with multiple `data:` lines joined by `\n`.
     public var data: String
+    /// Last event ID for reconnection bookkeeping.
     public var id: String?
+    /// Reconnection time hint from the server (milliseconds), per the WHATWG
+    /// SSE spec `retry:` field. Unrelated to ``RetryPolicy``.
     public var retry: Int?
 
     public init(event: String? = nil, data: String, id: String? = nil, retry: Int? = nil) {

@@ -3,8 +3,11 @@ import Foundation
 /// Deterministic transport for tests. Responds from a script of canned
 /// responses (or a closure), recording the requests it received.
 public final class MockTransport: HTTPTransport, HTTPStreamingTransport, @unchecked Sendable {
+    /// A scripted outcome for a single request.
     public enum Outcome: Sendable {
+        /// Return the given response.
         case response(HTTPResponse)
+        /// Throw the given error.
         case failure(any Error)
     }
 

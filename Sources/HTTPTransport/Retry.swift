@@ -1,8 +1,14 @@
 import Foundation
 
-/// The retry decision for a single attempt.
+/// The outcome of a single retry evaluation.
+///
+/// Returned by ``RetryPolicy/decision(status:error:attempt:rateLimit:)`` to
+/// tell ``RetryingTransport`` whether to sleep and retry or to surface the
+/// error/response to the caller.
 public enum RetryDecision: Sendable, Equatable {
+    /// Sleep for the given number of seconds, then issue the request again.
     case retry(after: TimeInterval)
+    /// Do not retry; propagate the response or error immediately.
     case stop
 }
 
@@ -12,7 +18,18 @@ public enum RetryDecision: Sendable, Equatable {
 /// rate-limit snapshot. Replaces the previously duplicated status-based and
 /// error-based policies.
 public protocol RetryPolicy: Sendable {
+    /// Maximum number of total attempts (first try + retries).
     var maxAttempts: Int { get }
+
+    /// Returns the retry decision for a completed attempt.
+    ///
+    /// - Parameters:
+    ///   - status: The HTTP status code of the response, or `nil` when the
+    ///     request failed at the transport level (network error, cancellation).
+    ///   - error: The thrown error when `status` is `nil`; otherwise `nil`.
+    ///   - attempt: The 1-based attempt number just completed (1 = first try).
+    ///   - rateLimit: Parsed rate-limit headers from the response, if any.
+    /// - Returns: ``RetryDecision/retry(after:)`` or ``RetryDecision/stop``.
     func decision(
         status: Int?,
         error: (any Error)?,
