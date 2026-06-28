@@ -1,6 +1,6 @@
 import Foundation
 
-/// Case-insensitive HTTP header storage that preserves insertion order.
+/// 大文字・小文字を区別せず挿入順を保持する HTTP ヘッダストレージ。
 public struct HTTPHeaders: Sendable, Equatable, ExpressibleByDictionaryLiteral {
     private var entries: [(name: String, value: String)]
 
@@ -30,12 +30,17 @@ public struct HTTPHeaders: Sendable, Equatable, ExpressibleByDictionaryLiteral {
     }
 }
 
-/// A transport-level HTTP request, independent of `URLSession`.
+/// `URLSession` に依存しないトランスポート層の HTTP リクエスト。
 public struct HTTPRequest: Sendable {
+    /// HTTP メソッド（`"GET"`, `"POST"` 等）。
     public var method: String
+    /// リクエスト先 URL。
     public var url: URL
+    /// HTTP リクエストヘッダ。
     public var headers: HTTPHeaders
+    /// リクエストボディ。`nil` は本文なし（`GET` 等）。
     public var body: Data?
+    /// タイムアウト秒数。`nil` のとき ``URLSessionTransport/defaultTimeout`` が適用される。
     public var timeout: TimeInterval?
 
     public init(
@@ -53,7 +58,7 @@ public struct HTTPRequest: Sendable {
     }
 }
 
-/// A transport-level HTTP response.
+/// トランスポート層の HTTP レスポンス。
 public struct HTTPResponse: Sendable {
     public let status: Int
     public let headers: HTTPHeaders
@@ -65,16 +70,16 @@ public struct HTTPResponse: Sendable {
         self.body = body
     }
 
-    /// `true` when the HTTP status code is in the 2xx success range.
+    /// HTTP ステータスコードが `200..<300`（2xx 成功範囲）なら `true`。
     public var isSuccess: Bool { (200..<300).contains(status) }
 }
 
-/// Errors surfaced by transports before any HTTP exchange completes.
+/// HTTP 通信が完了する前にトランスポート層で発生するエラー。
 public enum TransportError: Error, Sendable {
-    /// The response object could not be interpreted as an `HTTPURLResponse`.
+    /// レスポンスを `HTTPURLResponse` として解釈できなかった。
     case invalidResponse
-    /// A network-layer error (connection refused, DNS failure, etc.).
+    /// ネットワーク層のエラー（接続拒否・DNS 解決失敗等）。
     case network(any Error)
-    /// The task was cancelled before a response was received.
+    /// レスポンス受信前にタスクがキャンセルされた。
     case cancelled
 }

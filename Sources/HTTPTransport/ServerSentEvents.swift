@@ -1,15 +1,14 @@
 import Foundation
 
-/// A decoded Server-Sent Events frame (WHATWG `text/event-stream`).
+/// WHATWG `text/event-stream` 形式のデコード済み SSE フレーム。
 public struct SSEEvent: Sendable, Equatable {
-    /// Named event type, or `nil` for the default `"message"` event.
+    /// イベントタイプ名。デフォルトの `"message"` イベントの場合は `nil`。
     public var event: String?
-    /// The event payload, with multiple `data:` lines joined by `\n`.
+    /// イベントのペイロード。複数の `data:` 行は `\n` で結合される。
     public var data: String
-    /// Last event ID for reconnection bookkeeping.
+    /// 再接続時に使用するラストイベント ID。
     public var id: String?
-    /// Reconnection time hint from the server (milliseconds), per the WHATWG
-    /// SSE spec `retry:` field. Unrelated to ``RetryPolicy``.
+    /// サーバーからの再接続時間ヒント（ミリ秒）。WHATWG SSE 仕様の `retry:` フィールドに対応。``RetryPolicy`` とは無関係。
     public var retry: Int?
 
     public init(event: String? = nil, data: String, id: String? = nil, retry: Int? = nil) {
@@ -20,11 +19,11 @@ public struct SSEEvent: Sendable, Equatable {
     }
 }
 
-/// Incremental SSE frame parser. Feed raw bytes; receive complete events.
+/// インクリメンタル SSE フレームパーサ。生バイトを受け取り、完成したイベントを返す。
 ///
-/// Splits on line boundaries and dispatches an event on a blank line, joining
-/// multiple `data:` lines with `\n` per the spec. Provider-specific meaning of
-/// the events is interpreted upstream, not here.
+/// 行境界で分割し、空行でイベントをディスパッチする。
+/// 複数の `data:` 行は仕様に従い `\n` で結合する。
+/// イベントのプロバイダ固有の意味解釈は上位層が担う。
 public struct SSEParser: Sendable {
     private var buffer = ""
     private var event: String?
@@ -34,6 +33,13 @@ public struct SSEParser: Sendable {
 
     public init() {}
 
+    /// 受信した生バイトチャンクを内部バッファに追記し、完成したイベントを返す。
+    ///
+    /// 内部バッファを行境界で分割し、空行を検出するたびに ``SSEEvent`` をディスパッチする。
+    /// 1 回の呼び出しで複数のイベントが完成している場合は複数要素を返す。
+    ///
+    /// - Parameter chunk: HTTP レスポンスボディから受け取った生バイトのチャンク。
+    /// - Returns: このチャンクで完成した ``SSEEvent`` の配列。完成イベントがなければ空配列。
     public mutating func consume(_ chunk: Data) -> [SSEEvent] {
         buffer += String(decoding: chunk, as: UTF8.self)
         var events: [SSEEvent] = []
@@ -46,7 +52,7 @@ public struct SSEParser: Sendable {
         return events
     }
 
-    /// Flushes any pending event at end of stream.
+    /// ストリーム終端で保留中のイベントをフラッシュする。
     public mutating func finish() -> SSEEvent? {
         process(line: "")
     }
@@ -82,7 +88,7 @@ public struct SSEParser: Sendable {
 }
 
 extension HTTPStreamingTransport {
-    /// Adapts a raw byte stream into a stream of decoded ``SSEEvent``s.
+    /// 生バイトストリームをデコード済みの ``SSEEvent`` ストリームに変換する。
     public func sseEvents(_ request: HTTPRequest) -> AsyncThrowingStream<SSEEvent, Error> {
         let byteStream = stream(request)
         return AsyncThrowingStream { continuation in

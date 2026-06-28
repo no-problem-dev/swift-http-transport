@@ -1,30 +1,28 @@
 # ``HTTPTransport``
 
-The single raw-HTTP seam for the NOPROBLEM stack. `URLSession` lives behind a
-protocol; retry, rate-limit parsing, and SSE decoding are all centralised here
-so higher layers never touch `URLSession` directly.
+NOPROBLEM スタックの唯一の生 HTTP 接合点。`URLSession` はプロトコルの背後に隠蔽され、
+リトライ・レート制限解析・SSE デコードをここに集約することで上位層は `URLSession` を直接扱わなくてよい。
 
 ## Overview
 
-All providers and `swift-api-client` depend only on the ``HTTPTransport`` and
-``HTTPStreamingTransport`` protocols, so the underlying transport is swappable
-(production `URLSessionTransport`, deterministic `MockTransport`, or any custom
-decorator such as ``RetryingTransport``).
+すべてのプロバイダと `swift-api-client` は ``HTTPTransport`` と
+``HTTPStreamingTransport`` プロトコルにのみ依存するため、
+本番用の `URLSessionTransport`・決定論的な `MockTransport`・
+``RetryingTransport`` のようなカスタムデコレータへの差し替えが可能。
 
-**Core flow:**
+**基本的な使い方:**
 
-1. Build an ``HTTPRequest`` (method, URL, headers, optional body/timeout).
-2. Call ``HTTPTransport/send(_:)`` — or ``HTTPStreamingTransport/stream(_:)``
-   for byte-streaming — and await the ``HTTPResponse``.
-3. Wrap the transport in ``RetryingTransport`` to add automatic retry with
-   ``ExponentialBackoff`` and rate-limit header awareness via
-   ``RateLimitHeaderMapping``.
-4. For `text/event-stream` responses call ``HTTPStreamingTransport/sseEvents(_:)``
-   to receive a stream of decoded ``SSEEvent`` values.
+1. ``HTTPRequest`` を構築する（メソッド・URL・ヘッダ・ボディ・タイムアウトを指定）。
+2. ``HTTPTransport/send(_:)`` を呼び出してレスポンス ``HTTPResponse`` を受け取る。
+   バイトストリーミングには ``HTTPStreamingTransport/stream(_:)`` を使用する。
+3. ``RetryingTransport`` でラップすることで、``ExponentialBackoff`` と
+   ``RateLimitHeaderMapping`` によるレート制限ヘッダ対応の自動リトライを追加できる。
+4. `text/event-stream` レスポンスには ``HTTPStreamingTransport/sseEvents(_:)`` を呼び出して
+   デコード済みの ``SSEEvent`` ストリームを受け取る。
 
 ## Topics
 
-### Request and Response
+### リクエストとレスポンス
 
 - ``HTTPRequest``
 - ``HTTPResponse``
@@ -32,30 +30,30 @@ decorator such as ``RetryingTransport``).
 - ``TransportError``
 - ``HTTPStatusError``
 
-### Transport Protocols
+### トランスポートプロトコル
 
 - ``HTTPTransport``
 - ``HTTPStreamingTransport``
 
-### Concrete Transports
+### 具象トランスポート
 
 - ``URLSessionTransport``
 - ``RetryingTransport``
 - ``MockTransport``
 
-### Retry
+### リトライ
 
 - ``RetryPolicy``
 - ``RetryDecision``
 - ``ExponentialBackoff``
 - ``NoRetry``
 
-### Rate Limiting
+### レート制限
 
 - ``RateLimitHeaderMapping``
 - ``RateLimitSnapshot``
 
-### Server-Sent Events
+### サーバー送信イベント
 
 - ``SSEParser``
 - ``SSEEvent``

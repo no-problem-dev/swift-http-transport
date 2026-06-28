@@ -1,13 +1,14 @@
 import Foundation
 
-/// Deterministic transport for tests. Responds from a script of canned
-/// responses (or a closure), recording the requests it received.
+/// テスト用の決定論的トランスポート。
+///
+/// スクリプト済みレスポンス（または クロージャ）から応答し、受信したリクエストを記録する。
 public final class MockTransport: HTTPTransport, HTTPStreamingTransport, @unchecked Sendable {
-    /// A scripted outcome for a single request.
+    /// 単一リクエストに対するスクリプト済みの結果。
     public enum Outcome: Sendable {
-        /// Return the given response.
+        /// 指定されたレスポンスを返す。
         case response(HTTPResponse)
-        /// Throw the given error.
+        /// 指定されたエラーをスローする。
         case failure(any Error)
     }
 
@@ -15,20 +16,43 @@ public final class MockTransport: HTTPTransport, HTTPStreamingTransport, @unchec
     private var scripted: [Outcome]
     private let handler: (@Sendable (HTTPRequest) throws -> HTTPResponse)?
     private var streamChunks: [Data]
+    /// ``send(_:)`` および ``stream(_:)`` が受け取ったリクエストを受信順に記録する。テストアサーションに使用する。
     public private(set) var recordedRequests: [HTTPRequest] = []
 
+    /// スクリプト方式のイニシャライザ。
+    ///
+    /// `outcomes` を先着順に消費してレスポンスを決定する。「N 回目は成功、N+1 回目はエラー」のように
+    /// 試行ごとの結果を固定したテストに使う。`streamChunks` は ``stream(_:)`` が yield するチャンク列に使用する。
+    ///
+    /// - Parameters:
+    ///   - outcomes: ``send(_:)`` の呼び出しに対するスクリプト済みの結果。空のとき 200 OK を返す。
+    ///   - streamChunks: ``stream(_:)`` が yield するバイトチャンク列。
     public init(_ outcomes: [Outcome] = [], streamChunks: [Data] = []) {
         self.scripted = outcomes
         self.handler = nil
         self.streamChunks = streamChunks
     }
 
+    /// クロージャ方式のイニシャライザ。
+    ///
+    /// リクエストの内容を検査して動的にレスポンスを決定したい場合に使う。
+    /// スクリプト方式（``init(_:streamChunks:)``）と異なり、受け取ったリクエストに基づいて結果を変えられる。
+    ///
+    /// - Parameter handler: リクエストを受け取りレスポンスを返す（またはスローする）クロージャ。
     public init(handler: @escaping @Sendable (HTTPRequest) throws -> HTTPResponse) {
         self.scripted = []
         self.handler = handler
         self.streamChunks = []
     }
 
+    /// 固定レスポンスを 1 件だけ返す便宜イニシャライザ。
+    ///
+    /// 単純な 1 回きりのレスポンスを確認するテストに使う。
+    ///
+    /// - Parameters:
+    ///   - status: HTTP ステータスコード。
+    ///   - headers: レスポンスヘッダ（デフォルト空）。
+    ///   - body: レスポンスボディ（デフォルト空）。
     public convenience init(status: Int, headers: HTTPHeaders = [:], body: Data = Data()) {
         self.init([.response(HTTPResponse(status: status, headers: headers, body: body))])
     }

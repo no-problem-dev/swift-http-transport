@@ -1,24 +1,42 @@
 import Foundation
 
-/// The single seam for sending an HTTP request and awaiting a full response.
+/// HTTP リクエストを送信して完全なレスポンスを待機するための唯一の接合点。
 ///
-/// All higher layers (api-client, providers) depend on this abstraction rather
-/// than `URLSession`, so transport can be mocked, decorated (retry), or swapped
-/// without touching call sites.
+/// 上位のすべての層（api-client・各プロバイダ）は `URLSession` ではなくこの抽象にのみ依存する。
+/// トランスポートをモック・デコレータ（リトライ）・別実装へ差し替えても呼び出し元を変更しなくてよい。
 public protocol HTTPTransport: Sendable {
+    /// HTTP リクエストを送信し、完全なレスポンスを返す。
+    ///
+    /// HTTP ステータスコードはエラーとして扱わず ``HTTPResponse/status`` に含まれる。
+    /// ステータスに応じた処理が必要な場合は ``HTTPResponse/isSuccess`` を確認する。
+    /// ネットワーク障害・キャンセル・非 HTTP レスポンスの場合は ``TransportError`` をスローする。
+    /// ストリーミング時の 2xx 以外ステータスで ``HTTPStatusError`` をスローする ``HTTPStreamingTransport/stream(_:)`` とは異なる。
+    ///
+    /// - Parameter request: 送信するリクエスト。
+    /// - Returns: サーバーから受信した完全な HTTP レスポンス。
+    /// - Throws: ``TransportError``（ネットワーク障害・キャンセル・非 HTTP レスポンス等）。
     func send(_ request: HTTPRequest) async throws -> HTTPResponse
 }
 
-/// Streaming counterpart: yields raw byte chunks as they arrive (for SSE etc.).
+/// ストリーミング版トランスポート。届いた生バイト列をチャンク単位で逐次返す（SSE 等に使用）。
 public protocol HTTPStreamingTransport: Sendable {
+    /// HTTP リクエストを送信し、レスポンスボディをチャンク単位で逐次 yield する `AsyncThrowingStream` を返す。
+    ///
+    /// SSE など長命なバイトストリームに使用する。
+    /// 全バイトを受信するとストリームは正常終了する。
+    /// サーバーが 2xx 以外のステータスを返した場合は ``HTTPStatusError`` をスローし、
+    /// ネットワーク障害・キャンセルの場合は ``TransportError`` をスローする。
+    ///
+    /// - Parameter request: 送信するリクエスト。
+    /// - Returns: レスポンスボディを随時 yield する `AsyncThrowingStream<Data, Error>`。
     func stream(_ request: HTTPRequest) -> AsyncThrowingStream<Data, Error>
 }
 
-/// `URLSession`-backed transport. The default concrete implementation.
+/// `URLSession` を背後に持つ標準の具象トランスポート。
 public struct URLSessionTransport: HTTPTransport, HTTPStreamingTransport {
-    /// The underlying `URLSession` used for all requests.
+    /// すべてのリクエストで使用する `URLSession`。
     public let session: URLSession
-    /// Timeout applied to requests that do not specify their own ``HTTPRequest/timeout``.
+    /// ``HTTPRequest/timeout`` を指定しないリクエストに適用するデフォルトタイムアウト。
     public var defaultTimeout: TimeInterval
 
     public init(session: URLSession = .shared, defaultTimeout: TimeInterval = 60) {
@@ -87,7 +105,7 @@ public struct URLSessionTransport: HTTPTransport, HTTPStreamingTransport {
     }
 }
 
-/// Thrown by streaming when the server responds with a non-2xx status.
+/// ストリーミング時にサーバーが 2xx 以外のステータスを返した場合にスローされるエラー。
 public struct HTTPStatusError: Error, Sendable {
     public let status: Int
     public let headers: HTTPHeaders

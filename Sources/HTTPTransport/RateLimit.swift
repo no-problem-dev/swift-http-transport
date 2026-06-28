@@ -1,11 +1,16 @@
 import Foundation
 
-/// A parsed snapshot of a provider's rate-limit headers.
+/// プロバイダのレート制限ヘッダを解析したスナップショット。
 public struct RateLimitSnapshot: Sendable, Equatable {
+    /// `Retry-After` ヘッダに基づく待機秒数。
     public var retryAfter: TimeInterval?
+    /// API リクエスト（HTTP コール数）の残余クォータ。`remainingTokens` とは独立したカウンタ。
     public var remainingRequests: Int?
+    /// API リクエストクォータのリセットまでの残り秒数。
     public var requestsReset: TimeInterval?
+    /// LLM トークン（入出力トークン数の合算）の残余クォータ。`remainingRequests` とは独立したカウンタ。
     public var remainingTokens: Int?
+    /// LLM トークンクォータのリセットまでの残り秒数。
     public var tokensReset: TimeInterval?
 
     public init(
@@ -22,25 +27,27 @@ public struct RateLimitSnapshot: Sendable, Equatable {
         self.tokensReset = tokensReset
     }
 
+    /// 全フィールドが `nil` のとき `true`。ヘッダに認識できる値が 1 件もなかったことを示す。
     public var isEmpty: Bool {
         retryAfter == nil && remainingRequests == nil && requestsReset == nil
             && remainingTokens == nil && tokensReset == nil
     }
 }
 
-/// Declarative mapping from a provider's header names to ``RateLimitSnapshot``.
+/// プロバイダのヘッダ名を ``RateLimitSnapshot`` へ変換する宣言的マッピング。
 ///
-/// Replaces the per-provider extractor copies: a provider supplies only its
-/// header names and reset format; the parsing logic lives here once.
+/// プロバイダごとに実装していたレート制限抽出ロジックを一本化する。
+/// プロバイダはヘッダ名とリセット形式を指定するだけでよく、解析ロジックはここに集約される。
 public struct RateLimitHeaderMapping: Sendable {
+    /// ヘッダ値のリセット時間形式。プロバイダごとに異なる表現を統一的に扱う。
     public enum ResetFormat: Sendable {
-        /// Seconds remaining until reset.
+        /// リセットまでの残り秒数。
         case secondsRemaining
-        /// Milliseconds remaining until reset.
+        /// リセットまでの残りミリ秒数。
         case millisecondsRemaining
-        /// An absolute RFC 3339 timestamp; converted to seconds-from-now.
+        /// RFC 3339 の絶対タイムスタンプ。現在時刻からの秒数に変換する。
         case rfc3339
-        /// A duration suffix such as `1s` / `6m0s` (Anthropic/OpenAI style).
+        /// `1s` / `6m0s` 形式の duration suffix（Anthropic/OpenAI スタイル）。
         case durationSuffix
     }
 
@@ -67,6 +74,14 @@ public struct RateLimitHeaderMapping: Sendable {
         self.resetFormat = resetFormat
     }
 
+    /// ヘッダを解析して ``RateLimitSnapshot`` を返す。
+    ///
+    /// マッピングに登録されたヘッダ名を探索し、対応するフィールドを抽出する。
+    /// ヘッダが存在しない・解析不能なフィールドは `nil` のままになるが、
+    /// 戻り値は常に非 Optional の ``RateLimitSnapshot``（全フィールドが解析不能でも `nil` を返さない）。
+    ///
+    /// - Parameter headers: レスポンスの HTTP ヘッダ。
+    /// - Returns: 解析結果を格納したスナップショット。全フィールドが解析不能な場合は ``RateLimitSnapshot/isEmpty`` が `true`。
     public func extract(from headers: HTTPHeaders) -> RateLimitSnapshot {
         var snapshot = RateLimitSnapshot()
         if let name = retryAfter, let value = headers[name] { snapshot.retryAfter = TimeInterval(value) }
@@ -95,7 +110,7 @@ public struct RateLimitHeaderMapping: Sendable {
         }
     }
 
-    /// Parses Go-style durations like `1s`, `6m0s`, `1m30s`, `500ms`.
+    /// `1s`・`6m0s`・`1m30s`・`500ms` のような Go スタイルの duration 文字列を解析する。
     static func parseDuration(_ text: String) -> TimeInterval? {
         var total: TimeInterval = 0
         var number = ""
