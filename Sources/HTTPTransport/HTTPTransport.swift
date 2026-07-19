@@ -50,6 +50,8 @@ public struct URLSessionTransport: HTTPTransport, HTTPStreamingTransport {
             let (data, response) = try await session.data(for: urlRequest)
             guard let http = response as? HTTPURLResponse else { throw TransportError.invalidResponse }
             return HTTPResponse(status: http.statusCode, headers: Self.headers(from: http), body: data)
+        } catch let error as TransportError {
+            throw error
         } catch is CancellationError {
             throw TransportError.cancelled
         } catch {
@@ -77,8 +79,14 @@ public struct URLSessionTransport: HTTPTransport, HTTPStreamingTransport {
                     }
                     if !buffer.isEmpty { continuation.yield(buffer) }
                     continuation.finish()
-                } catch {
+                } catch let error as HTTPStatusError {
                     continuation.finish(throwing: error)
+                } catch let error as TransportError {
+                    continuation.finish(throwing: error)
+                } catch is CancellationError {
+                    continuation.finish(throwing: TransportError.cancelled)
+                } catch {
+                    continuation.finish(throwing: TransportError.network(error))
                 }
             }
             continuation.onTermination = { _ in task.cancel() }
