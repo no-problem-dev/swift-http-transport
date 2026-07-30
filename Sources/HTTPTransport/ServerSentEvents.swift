@@ -25,7 +25,12 @@ public struct SSEEvent: Sendable, Equatable {
 /// 複数の `data:` 行は仕様に従い `\n` で結合する。
 /// イベントのプロバイダ固有の意味解釈は上位層が担う。
 public struct SSEParser: Sendable {
-    private var buffer = ""
+    /// 生バイトのままバッファする。行分割は必ずバイトレベルで行う —
+    /// Swift の String は `\r\n` を 1 書記素として扱うため、String に対する
+    /// `firstIndex(of: "\n")` は CRLF 行末のストリームで行境界を一切検出できない。
+    /// バイト保持は UTF-8 マルチバイト文字がチャンク境界で分断されるケースも
+    /// 同時に解決する（String 変換は完成した行に対してのみ行う）。
+    private var buffer: [UInt8] = []
     private var event: String?
     private var dataLines: [String] = []
     private var id: String?
@@ -35,26 +40,48 @@ public struct SSEParser: Sendable {
 
     /// 受信した生バイトチャンクを内部バッファに追記し、完成したイベントを返す。
     ///
-    /// 内部バッファを行境界で分割し、空行を検出するたびに ``SSEEvent`` をディスパッチする。
+    /// 内部バッファを行境界（LF。直前の CR は除去 = CRLF 対応）で分割し、
+    /// 空行を検出するたびに ``SSEEvent`` をディスパッチする。
     /// 1 回の呼び出しで複数のイベントが完成している場合は複数要素を返す。
     ///
     /// - Parameter chunk: HTTP レスポンスボディから受け取った生バイトのチャンク。
     /// - Returns: このチャンクで完成した ``SSEEvent`` の配列。完成イベントがなければ空配列。
     public mutating func consume(_ chunk: Data) -> [SSEEvent] {
-        buffer += String(decoding: chunk, as: UTF8.self)
+        buffer.append(contentsOf: chunk)
         var events: [SSEEvent] = []
-        while let newline = buffer.firstIndex(of: "\n") {
-            var line = String(buffer[..<newline])
-            buffer = String(buffer[buffer.index(after: newline)...])
-            if line.hasSuffix("\r") { line.removeLast() }
-            if let event = process(line: line) { events.append(event) }
+        var start = 0
+        var index = 0
+        while index < buffer.count {
+            if buffer[index] == 0x0A {
+                var line = buffer[start ..< index]
+                if line.last == 0x0D {
+                    line = line.dropLast()
+                }
+                if let event = process(line: String(decoding: line, as: UTF8.self)) {
+                    events.append(event)
+                }
+                start = index + 1
+            }
+            index += 1
         }
+        buffer.removeFirst(start)
         return events
     }
 
     /// ストリーム終端で保留中のイベントをフラッシュする。
+    /// 末尾改行なしで終わったストリームの最終行も処理してからフラッシュする。
     public mutating func finish() -> SSEEvent? {
-        process(line: "")
+        if !buffer.isEmpty {
+            var line = buffer[...]
+            if line.last == 0x0D {
+                line = line.dropLast()
+            }
+            buffer.removeAll()
+            if let event = process(line: String(decoding: line, as: UTF8.self)) {
+                return event
+            }
+        }
+        return process(line: "")
     }
 
     private mutating func process(line: String) -> SSEEvent? {

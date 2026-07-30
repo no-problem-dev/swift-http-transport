@@ -121,4 +121,36 @@ struct SSETests {
         }
         #expect(received == ["a", "b"])
     }
+
+    @Test("CRLF 行末のストリームでも行境界を検出する（Swift String の \\r\\n 1 書記素問題の回帰）")
+    func parsesCRLFLineEndings() {
+        var parser = SSEParser()
+        let events = parser.consume(Data("event: delta\r\ndata: {\"x\":1}\r\n\r\ndata: b\r\n\r\n".utf8))
+        #expect(events.count == 2)
+        #expect(events[0].event == "delta")
+        #expect(events[0].data == "{\"x\":1}")
+        #expect(events[1].data == "b")
+    }
+
+    @Test("UTF-8 マルチバイト文字がチャンク境界で分断されても壊れない")
+    func handlesMultibyteSplitAcrossChunks() {
+        var parser = SSEParser()
+        let payload = Array("data: こんにちは\n\n".utf8)
+        // 「ん」(3 バイト)の途中でチャンクを切る
+        let splitIndex = 9 // "data: こ" = 6 + 3 バイト、次の文字の途中
+        var events = parser.consume(Data(payload[..<(splitIndex + 1)]))
+        #expect(events.isEmpty)
+        events = parser.consume(Data(payload[(splitIndex + 1)...]))
+        #expect(events.count == 1)
+        #expect(events[0].data == "こんにちは")
+    }
+
+    @Test("末尾改行なしで終わるストリームの最終イベントを finish で救う")
+    func finishFlushesTrailingLineWithoutNewline() {
+        var parser = SSEParser()
+        let events = parser.consume(Data("data: tail".utf8))
+        #expect(events.isEmpty)
+        let last = parser.finish()
+        #expect(last?.data == "tail")
+    }
 }
