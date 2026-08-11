@@ -5,6 +5,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `AnyStreamingTransport`, a concrete box for `any HTTPTransport & HTTPStreamingTransport`.
+  Making `RetryingTransport` generic is what keeps the streaming capability through a wrap, but it
+  also means an existential cannot be passed to it — an existential does not conform to the
+  protocol it erases. A composition root that stores its transport as an existential, which is the
+  ordinary shape for an injected dependency, needs this. Found by swift-api-client failing to build
+  against 2.0.0.
+
+
 ## [2.0.0] - 2026-08-11
 
 ### Removed

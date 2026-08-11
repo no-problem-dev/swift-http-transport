@@ -46,3 +46,30 @@ struct PublicSurfaceTests {
         #expect(String(decoding: response.body, as: UTF8.self) == "ok")
     }
 }
+
+@Suite("existential を generic に渡せること")
+struct AnyStreamingTransportTests {
+    /// The shape a composition root actually has.
+    ///
+    /// `RetryingTransport` being generic is what keeps the streaming capability when a transport is
+    /// wrapped — but it also means an existential cannot be passed directly, because an existential
+    /// does not conform to the protocol it erases. A caller storing `any HTTPTransport &
+    /// HTTPStreamingTransport`, which is the ordinary shape for an injected dependency, needs a box.
+    @Test func wrapsAnExistentialAndKeepsStreaming() async throws {
+        let mock = MockTransport(
+            [.response(HTTPResponse(status: 200, headers: [:], body: Data("ok".utf8)))],
+            streamChunks: [Data("ok".utf8)])
+        let erased: any HTTPTransport & HTTPStreamingTransport = AnyStreamingTransport(mock)
+
+        let retrying = RetryingTransport(base: AnyStreamingTransport(erased), policy: NoRetry())
+        let response = try await retrying.send(HTTPRequest(method: "GET", url: URL(string: "https://x.dev")!))
+        #expect(response.status == 200)
+
+        // The point of the box: `stream` survives the wrap. This line not compiling is the failure.
+        var chunks: [Data] = []
+        for try await chunk in retrying.stream(HTTPRequest(method: "GET", url: URL(string: "https://x.dev")!)) {
+            chunks.append(chunk)
+        }
+        #expect(chunks.joined().isEmpty == false)
+    }
+}
