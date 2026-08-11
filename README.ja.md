@@ -54,7 +54,7 @@ Swift 6.2 · iOS 17 · macOS 14 · tvOS 17 · watchOS 10 · visionOS 1 · Linux
 `Package.swift` に追加する:
 
 ```swift
-.package(url: "https://github.com/no-problem-dev/swift-http-transport", from: "1.0.0")
+.package(url: "https://github.com/no-problem-dev/swift-http-transport", from: "2.0.0")
 ```
 
 ターゲットにプロダクトを追加する:
