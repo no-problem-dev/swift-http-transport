@@ -2,8 +2,8 @@ English | [日本語](./README.ja.md)
 
 # swift-http-transport
 
-The single raw-HTTP seam for the NOPROBLEM stack: `URLSession` behind a
-protocol, with retry, rate-limit parsing, and SSE decoding in one place.
+Write retry, rate-limit handling, and server-sent events once instead of once per API client —
+`URLSession` sits behind a protocol you can swap for a fake in tests.
 
 ## Overview
 

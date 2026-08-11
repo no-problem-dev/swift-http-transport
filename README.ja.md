@@ -2,8 +2,8 @@
 
 # swift-http-transport
 
-NOPROBLEM スタックの唯一の生 HTTP 接合点。`URLSession` をプロトコルの背後に置き、
-リトライ・レート制限の解析・SSE のデコードを一箇所にまとめる。
+リトライ・レート制限・Server-Sent Events を、API クライアントごとにではなく 1 回だけ書く。
+`URLSession` はプロトコルの背後にあるので、テストでは差し替えられる。
 
 ## 概要
 
