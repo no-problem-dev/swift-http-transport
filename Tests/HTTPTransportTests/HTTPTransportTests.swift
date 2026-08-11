@@ -136,8 +136,8 @@ struct SSETests {
     func handlesMultibyteSplitAcrossChunks() {
         var parser = SSEParser()
         let payload = Array("data: こんにちは\n\n".utf8)
-        // 「ん」(3 バイト)の途中でチャンクを切る
-        let splitIndex = 9 // "data: こ" = 6 + 3 バイト、次の文字の途中
+        // Cut the chunk in the middle of a 3-byte character
+        let splitIndex = 9 // "data: " is 6 bytes + 3 for the next character
         var events = parser.consume(Data(payload[..<(splitIndex + 1)]))
         #expect(events.isEmpty)
         events = parser.consume(Data(payload[(splitIndex + 1)...]))

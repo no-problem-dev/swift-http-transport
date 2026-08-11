@@ -2,17 +2,18 @@ import Foundation
 import Testing
 @testable import HTTPTransport
 
-/// ネットワークに一切出ずに `URLSession` へ応答を返す `URLProtocol` スタブ。
+/// A `URLProtocol` stub that answers `URLSession` without touching the network.
 ///
-/// URL ごとにスクリプトを登録し、実物の `URLSessionTransport` を URL ローディングシステムごと検証する。
-/// テストの並列実行に耐えるよう、スクリプトと受信記録は URL をキーに分離する。
+/// Scripts are registered per URL so the real `URLSessionTransport` is exercised
+/// through the actual URL loading system. Keying both the scripts and the
+/// received requests by URL keeps parallel tests from colliding.
 final class StubURLProtocol: URLProtocol {
     enum Script {
-        /// HTTP レスポンスを返す。`chunks` は `didLoad` の分割単位。
+        /// Answer with an HTTP response. Each chunk is delivered as one `didLoad`.
         case http(status: Int, headers: [String: String] = [:], chunks: [Data] = [])
-        /// ローディングを指定エラーで失敗させる。
+        /// Fail the load with the given error.
         case failure(any Error)
-        /// `HTTPURLResponse` ではない素の `URLResponse` を返す。
+        /// Answer with a bare `URLResponse`, which is not an `HTTPURLResponse`.
         case nonHTTPResponse
     }
 
@@ -24,7 +25,7 @@ final class StubURLProtocol: URLProtocol {
         lock.withLock { scripts[url] = script }
     }
 
-    /// スタブが受信したリクエストと（ストリームから読み出した）ボディを返す。
+    /// The request the stub received, with its body already read from the stream.
     static func received(for url: URL) -> (request: URLRequest, body: Data?)? {
         lock.withLock { received[url] }
     }
@@ -56,7 +57,7 @@ final class StubURLProtocol: URLProtocol {
 
     override func stopLoading() {}
 
-    /// `URLSession` はボディを `httpBodyStream` に変換して渡すため、ストリームから読み戻す。
+    /// `URLSession` converts the body to an `httpBodyStream`, so read it back out.
     private static func bodyData(of request: URLRequest) -> Data? {
         if let body = request.httpBody { return body }
         guard let stream = request.httpBodyStream else { return nil }
@@ -186,7 +187,7 @@ struct URLSessionTransportStreamTests {
             chunkCount += 1
         }
         #expect(collected == body)
-        #expect(chunkCount >= 2) // 4096 バイトのバッファ境界で分割される
+        #expect(chunkCount >= 2) // split at the 4096-byte buffer boundary
     }
 
     @Test

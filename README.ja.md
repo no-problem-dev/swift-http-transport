@@ -2,8 +2,52 @@
 
 # swift-http-transport
 
-通信層の唯一の生 HTTP 実体。`URLSession` をプロトコルの背後に置き、リトライ・レート制限・
-SSE を一元化する。上位（swift-api-client、各プロバイダ）はこの抽象にのみ依存する。
+NOPROBLEM スタックの唯一の生 HTTP 接合点。`URLSession` をプロトコルの背後に置き、
+リトライ・レート制限の解析・SSE のデコードを一箇所にまとめる。
+
+## 概要
+
+この上の層はすべて `URLSession` ではなく `HTTPTransport` プロトコルに依存する。
+それで得られるものが 4 つある。
+
+- **リトライの規則がひとつ。** `RetryingTransport` は任意のトランスポートを包み、
+  ステータス・スローされたエラー・解析済みのクォータヘッダをまとめて見るポリシーを
+  適用する。プロバイダごとに少しずつ違うリトライループを書かなくてよい。
+- **レート制限をプロバイダごとに解析しない。** プロバイダはヘッダ名とリセット時刻の
+  表記形式を宣言するだけでよく、解析そのものはここにある。
+- **実ストリームで壊れない SSE。** フレームの分割をバイト単位で行うため、CRLF 改行も
+  チャンク境界をまたぐマルチバイト文字も正しくデコードされる。
+- **ネットワーク無しのテスト。** `MockTransport` は応答を台本どおりに返し、
+  送られたリクエストを記録する。
+
+HTTP のエラーステータスはスローされない。4xx・5xx は通常のレスポンスとして返る。
+スローされるのは、レスポンスが成立しなかった場合だけ。
+
+依存は Foundation のみ。
+
+## 使い方
+
+```swift
+import HTTPTransport
+
+let transport = URLSessionTransport()
+let response = try await transport.send(
+    HTTPRequest(method: "GET", url: URL(string: "https://api.example.com/data")!)
+)
+if response.isSuccess {
+    // response.body
+}
+```
+
+リトライの組み立て・SSE のストリーミング・モックを使ったテストはドキュメントにある。
+
+## ドキュメント
+
+[API リファレンスとガイド](https://no-problem-dev.github.io/swift-http-transport/documentation/httptransport)
+
+## 動作環境
+
+Swift 6.2 · iOS 17 · macOS 14 · tvOS 17 · watchOS 10 · visionOS 1
 
 ## インストール
 
@@ -13,73 +57,16 @@ SSE を一元化する。上位（swift-api-client、各プロバイダ）はこ
 .package(url: "https://github.com/no-problem-dev/swift-http-transport", from: "1.0.0")
 ```
 
-ターゲットの依存へ追加する:
+ターゲットにプロダクトを追加する:
 
 ```swift
 .target(name: "MyTarget", dependencies: ["HTTPTransport"])
 ```
 
-## 使い方
+## コントリビュート
 
-### 基本リクエスト
-
-```swift
-import HTTPTransport
-
-let transport = URLSessionTransport()
-let request = HTTPRequest(method: "GET", url: URL(string: "https://api.example.com/data")!)
-let response = try await transport.send(request)
-if response.isSuccess {
-    // response.body を利用する
-}
-```
-
-### リトライ
-
-```swift
-let transport = RetryingTransport(
-    base: URLSessionTransport(),
-    policy: ExponentialBackoff(maxAttempts: 3),
-    rateLimitMapping: RateLimitHeaderMapping(
-        remainingRequests: "x-ratelimit-remaining-requests",
-        requestsReset: "x-ratelimit-reset-requests",
-        resetFormat: .durationSuffix
-    )
-)
-```
-
-### Server-Sent Events
-
-```swift
-let transport = URLSessionTransport()
-let request = HTTPRequest(method: "POST", url: url, headers: ["Accept": "text/event-stream"])
-for try await event in transport.sseEvents(request) {
-    print(event.data)
-}
-```
-
-### テスト
-
-```swift
-let mock = MockTransport(status: 200, body: Data("{\"ok\":true}".utf8))
-let response = try await mock.send(request)
-print(mock.recordedRequests.count) // 1
-```
-
-## モジュール構成
-
-| 型 | 役割 |
-|---|---|
-| `HTTPTransport` / `HTTPStreamingTransport` | 送受信の規定プロトコル（`send` / `stream`） |
-| `URLSessionTransport` | 既定の具象実装（`URLSession` 背後） |
-| `MockTransport` | 決定論的テスト用（スクリプト/クロージャ応答・リクエスト記録） |
-| `RetryPolicy` / `ExponentialBackoff` / `NoRetry` | 唯一のリトライ抽象（status + error + rate-limit で判定） |
-| `RetryingTransport` | リトライをトランスポート層で一元化するデコレータ |
-| `RateLimitHeaderMapping` / `RateLimitSnapshot` | ヘッダ名マッピングだけでレート制限抽出（秒/ミリ秒/RFC3339/duration suffix） |
-| `SSEParser` / `SSEEvent` / `sseEvents(_:)` | WHATWG SSE フレーム分割・解釈 |
-
-`HTTPRequest`/`HTTPResponse`/`HTTPHeaders`（大小文字無視・順序保持）は Foundation 最小の値型。
+[CONTRIBUTING.md](./CONTRIBUTING.md) を参照。
 
 ## ライセンス
 
-MIT
+MIT — [LICENSE](./LICENSE) を参照。

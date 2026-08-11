@@ -1,28 +1,84 @@
 # ``HTTPTransport``
 
-NOPROBLEM スタックの唯一の生 HTTP 接合点。`URLSession` はプロトコルの背後に隠蔽され、
-リトライ・レート制限解析・SSE デコードをここに集約することで上位層は `URLSession` を直接扱わなくてよい。
+The one seam raw HTTP passes through, so nothing above it has to touch `URLSession`.
 
 ## Overview
 
-すべてのプロバイダと `swift-api-client` は ``HTTPTransport`` と
-``HTTPStreamingTransport`` プロトコルにのみ依存するため、
-本番用の `URLSessionTransport`・決定論的な `MockTransport`・
-``RetryingTransport`` のようなカスタムデコレータへの差し替えが可能。
+Providers and `swift-api-client` depend on the ``HTTPTransport`` and
+``HTTPStreamingTransport`` protocols, never on a concrete session. Retry,
+rate-limit parsing, and SSE decoding therefore exist once here rather than once
+per caller, and any transport can be replaced with a mock or wrapped in a
+decorator without a call site changing.
 
-**基本的な使い方:**
+Two rules are worth knowing before the first call:
 
-1. ``HTTPRequest`` を構築する（メソッド・URL・ヘッダ・ボディ・タイムアウトを指定）。
-2. ``HTTPTransport/send(_:)`` を呼び出してレスポンス ``HTTPResponse`` を受け取る。
-   バイトストリーミングには ``HTTPStreamingTransport/stream(_:)`` を使用する。
-3. ``RetryingTransport`` でラップすることで、``ExponentialBackoff`` と
-   ``RateLimitHeaderMapping`` によるレート制限ヘッダ対応の自動リトライを追加できる。
-4. `text/event-stream` レスポンスには ``HTTPStreamingTransport/sseEvents(_:)`` を呼び出して
-   デコード済みの ``SSEEvent`` ストリームを受け取る。
+- An HTTP status is not an error. ``HTTPTransport/send(_:)`` returns 4xx and 5xx
+  as ordinary responses; check ``HTTPResponse/isSuccess``. Only failures that
+  stop a response forming throw ``TransportError``.
+- ``HTTPStreamingTransport/stream(_:)`` is the exception: a non-2xx status fails
+  the stream with ``HTTPStatusError`` and no chunk is ever yielded.
+
+## Getting started
+
+### Compose the transport
+
+Retry is a decorator, so it composes rather than being configured. The policy
+sees the status, the thrown error, and the parsed quota headers together.
+
+```swift
+let transport = RetryingTransport(
+    base: URLSessionTransport(defaultTimeout: 30),
+    policy: ExponentialBackoff(maxAttempts: 3),
+    rateLimitMapping: RateLimitHeaderMapping(
+        remainingRequests: "x-ratelimit-remaining-requests",
+        requestsReset: "x-ratelimit-reset-requests",
+        resetFormat: .durationSuffix
+    )
+)
+```
+
+A `Retry-After` header wins over the computed backoff. The request is replayed
+unchanged whatever its method, so weigh that before retrying writes.
+
+### Read an event stream
+
+``HTTPStreamingTransport/sseEvents(_:)`` decodes frames as they arrive,
+absorbing chunk boundaries and CRLF line endings.
+
+```swift
+let request = HTTPRequest(
+    method: "POST",
+    url: url,
+    headers: ["Accept": "text/event-stream"],
+    body: payload
+)
+for try await event in URLSessionTransport().sseEvents(request) {
+    guard event.data != "[DONE]" else { break }
+    handle(event.data)
+}
+```
+
+Leaving the loop cancels the underlying request.
+
+### Test without a network
+
+``MockTransport`` scripts outcomes in order and records what was sent.
+
+```swift
+let mock = MockTransport([
+    .response(HTTPResponse(status: 429, headers: ["retry-after": "0"], body: Data())),
+    .response(HTTPResponse(status: 200, headers: [:], body: Data("done".utf8))),
+])
+let retrying = RetryingTransport(base: mock, policy: ExponentialBackoff(), sleep: { _ in })
+_ = try await retrying.send(request)
+#expect(mock.recordedRequests.count == 2)
+```
+
+Injecting `sleep` runs the backoff schedule without real delay.
 
 ## Topics
 
-### リクエストとレスポンス
+### Requests and responses
 
 - ``HTTPRequest``
 - ``HTTPResponse``
@@ -30,30 +86,30 @@ NOPROBLEM スタックの唯一の生 HTTP 接合点。`URLSession` はプロト
 - ``TransportError``
 - ``HTTPStatusError``
 
-### トランスポートプロトコル
+### Transport protocols
 
 - ``HTTPTransport``
 - ``HTTPStreamingTransport``
 
-### 具象トランスポート
+### Concrete transports
 
 - ``URLSessionTransport``
 - ``RetryingTransport``
 - ``MockTransport``
 
-### リトライ
+### Retry
 
 - ``RetryPolicy``
 - ``RetryDecision``
 - ``ExponentialBackoff``
 - ``NoRetry``
 
-### レート制限
+### Rate limits
 
 - ``RateLimitHeaderMapping``
 - ``RateLimitSnapshot``
 
-### サーバー送信イベント
+### Server-sent events
 
 - ``SSEParser``
 - ``SSEEvent``

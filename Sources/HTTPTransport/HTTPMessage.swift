@@ -1,6 +1,11 @@
 import Foundation
 
-/// 大文字・小文字を区別せず挿入順を保持する HTTP ヘッダストレージ。
+/// Header storage with case-insensitive lookup and insertion order preserved.
+///
+/// Subscript assignment replaces any field of the same name whatever its case,
+/// so headers built that way hold each name once. The array and dictionary
+/// initialisers do *not* deduplicate: give the same name twice and lookup
+/// returns the first, leaving the second unreachable.
 public struct HTTPHeaders: Sendable, Equatable, ExpressibleByDictionaryLiteral {
     private var entries: [(name: String, value: String)]
 
@@ -22,6 +27,11 @@ public struct HTTPHeaders: Sendable, Equatable, ExpressibleByDictionaryLiteral {
         }
     }
 
+    /// The fields in insertion order, with original capitalisation intact.
+    ///
+    /// Use this when the order or the exact spelling matters, such as when
+    /// replaying headers onto another request. Lookup by name should go through
+    /// the subscript instead, which ignores case.
     public var pairs: [(name: String, value: String)] { entries }
 
     public static func == (lhs: HTTPHeaders, rhs: HTTPHeaders) -> Bool {
@@ -30,17 +40,29 @@ public struct HTTPHeaders: Sendable, Equatable, ExpressibleByDictionaryLiteral {
     }
 }
 
-/// `URLSession` に依存しないトランスポート層の HTTP リクエスト。
+/// A request described without reference to `URLSession`, so any transport can carry it.
 public struct HTTPRequest: Sendable {
-    /// HTTP メソッド（`"GET"`, `"POST"` 等）。
+    /// The method verb, uppercase by convention and never validated here.
     public var method: String
-    /// リクエスト先 URL。
+
+    /// The destination. Any query string must already be percent-encoded.
     public var url: URL
-    /// HTTP リクエストヘッダ。
+
+    /// Fields to send.
+    ///
+    /// Each name is *set* on the outgoing request rather than appended, so a
+    /// name repeated in ``HTTPHeaders`` collapses to its last value on the wire.
     public var headers: HTTPHeaders
-    /// リクエストボディ。`nil` は本文なし（`GET` 等）。
+
+    /// Raw body bytes, sent exactly as given, or `nil` for a request with none.
+    ///
+    /// Nothing is inferred from the bytes — set `Content-Type` yourself.
     public var body: Data?
-    /// タイムアウト秒数。`nil` のとき ``URLSessionTransport/defaultTimeout`` が適用される。
+
+    /// Timeout in seconds for this request alone.
+    ///
+    /// `nil` defers to the transport's own default, such as
+    /// ``URLSessionTransport/defaultTimeout``.
     public var timeout: TimeInterval?
 
     public init(
@@ -58,7 +80,11 @@ public struct HTTPRequest: Sendable {
     }
 }
 
-/// トランスポート層の HTTP レスポンス。
+/// A complete response, including one whose status reports failure.
+///
+/// The body is already fully in memory by the time this exists. A non-2xx
+/// status arrives here rather than being thrown, so check ``isSuccess`` before
+/// reading the body as a success payload.
 public struct HTTPResponse: Sendable {
     public let status: Int
     public let headers: HTTPHeaders
@@ -70,16 +96,29 @@ public struct HTTPResponse: Sendable {
         self.body = body
     }
 
-    /// HTTP ステータスコードが `200..<300`（2xx 成功範囲）なら `true`。
+    /// Whether the status is 2xx. Redirects and 304 count as unsuccessful.
     public var isSuccess: Bool { (200..<300).contains(status) }
 }
 
-/// HTTP 通信が完了する前にトランスポート層で発生するエラー。
+/// A failure that stopped any response from forming.
+///
+/// An HTTP error status is never reported this way — 4xx and 5xx arrive as an
+/// ordinary ``HTTPResponse``.
 public enum TransportError: Error, Sendable {
-    /// レスポンスを `HTTPURLResponse` として解釈できなかった。
+    /// The reply was not an HTTP response, so it carries no status or headers.
     case invalidResponse
-    /// ネットワーク層のエラー（接続拒否・DNS 解決失敗等）。
+
+    /// An error from the URL loading system, wrapped unchanged.
+    ///
+    /// Usually a `URLError`: connection refused, DNS failure, timeout. Note
+    /// that cancellation reported by the URL loading system also arrives here,
+    /// wrapping `URLError.cancelled`, rather than as ``cancelled``.
     case network(any Error)
-    /// レスポンス受信前にタスクがキャンセルされた。
+
+    /// The task was cancelled before a response arrived.
+    ///
+    /// Only raised when cancellation surfaces as a `CancellationError`. Match
+    /// ``network(_:)`` for `URLError.cancelled` too if cancellation needs to be
+    /// handled uniformly.
     case cancelled
 }

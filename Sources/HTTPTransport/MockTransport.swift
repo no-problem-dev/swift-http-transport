@@ -1,14 +1,18 @@
 import Foundation
 
-/// テスト用の決定論的トランスポート。
+/// A transport for tests that answers from a script instead of the network.
 ///
-/// スクリプト済みレスポンス（または クロージャ）から応答し、受信したリクエストを記録する。
+/// Every request is kept in ``recordedRequests`` for assertions afterwards.
+///
+/// Note that ``stream(_:)`` ignores the scripted outcomes entirely: it always
+/// replays `streamChunks` and always succeeds, so streaming failure paths
+/// cannot be exercised through it.
 public final class MockTransport: HTTPTransport, HTTPStreamingTransport, @unchecked Sendable {
-    /// 単一リクエストに対するスクリプト済みの結果。
+    /// One scripted answer, consumed by a single ``send(_:)`` call.
     public enum Outcome: Sendable {
-        /// 指定されたレスポンスを返す。
+        /// Return this response, whatever its status.
         case response(HTTPResponse)
-        /// 指定されたエラーをスローする。
+        /// Throw this error instead of answering.
         case failure(any Error)
     }
 
@@ -16,43 +20,48 @@ public final class MockTransport: HTTPTransport, HTTPStreamingTransport, @unchec
     private var scripted: [Outcome]
     private let handler: (@Sendable (HTTPRequest) throws -> HTTPResponse)?
     private var streamChunks: [Data]
-    /// ``send(_:)`` および ``stream(_:)`` が受け取ったリクエストを受信順に記録する。テストアサーションに使用する。
+
+    /// Requests seen so far, in arrival order.
+    ///
+    /// Reading this while requests are still in flight is not synchronised;
+    /// assert on it once the calls under test have finished.
     public private(set) var recordedRequests: [HTTPRequest] = []
 
-    /// スクリプト方式のイニシャライザ。
+    /// Creates a transport that answers from a fixed script.
     ///
-    /// `outcomes` を先着順に消費してレスポンスを決定する。「N 回目は成功、N+1 回目はエラー」のように
-    /// 試行ごとの結果を固定したテストに使う。`streamChunks` は ``stream(_:)`` が yield するチャンク列に使用する。
+    /// Outcomes are consumed in order, one per ``send(_:)`` call, which is what
+    /// you want for "fail twice, then succeed" style tests. Once the script
+    /// runs out every further call returns an empty 200.
     ///
     /// - Parameters:
-    ///   - outcomes: ``send(_:)`` の呼び出しに対するスクリプト済みの結果。空のとき 200 OK を返す。
-    ///   - streamChunks: ``stream(_:)`` が yield するバイトチャンク列。
+    ///   - outcomes: Answers for successive ``send(_:)`` calls.
+    ///   - streamChunks: Bytes for ``stream(_:)`` to yield, replayed in full on
+    ///     every call regardless of `outcomes`.
     public init(_ outcomes: [Outcome] = [], streamChunks: [Data] = []) {
         self.scripted = outcomes
         self.handler = nil
         self.streamChunks = streamChunks
     }
 
-    /// クロージャ方式のイニシャライザ。
+    /// Creates a transport that computes each answer from the request.
     ///
-    /// リクエストの内容を検査して動的にレスポンスを決定したい場合に使う。
-    /// スクリプト方式（``init(_:streamChunks:)``）と異なり、受け取ったリクエストに基づいて結果を変えられる。
+    /// Use when the response has to depend on what was sent — a different body
+    /// per URL, say. Unlike the scripted form this never runs out, and the
+    /// closure takes precedence over any scripted outcomes.
     ///
-    /// - Parameter handler: リクエストを受け取りレスポンスを返す（またはスローする）クロージャ。
+    /// - Parameter handler: Produces a response, or throws, for each request.
     public init(handler: @escaping @Sendable (HTTPRequest) throws -> HTTPResponse) {
         self.scripted = []
         self.handler = handler
         self.streamChunks = []
     }
 
-    /// 固定レスポンスを 1 件だけ返す便宜イニシャライザ。
-    ///
-    /// 単純な 1 回きりのレスポンスを確認するテストに使う。
+    /// Creates a transport that answers one request, then falls back to empty 200s.
     ///
     /// - Parameters:
-    ///   - status: HTTP ステータスコード。
-    ///   - headers: レスポンスヘッダ（デフォルト空）。
-    ///   - body: レスポンスボディ（デフォルト空）。
+    ///   - status: Status for the first response.
+    ///   - headers: Headers for the first response.
+    ///   - body: Body for the first response.
     public convenience init(status: Int, headers: HTTPHeaders = [:], body: Data = Data()) {
         self.init([.response(HTTPResponse(status: status, headers: headers, body: body))])
     }

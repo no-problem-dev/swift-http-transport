@@ -1,34 +1,39 @@
 import Foundation
 
-/// 1 回のリトライ評価の結果。
+/// What to do once an attempt has finished.
 ///
-/// ``RetryPolicy/decision(status:error:attempt:rateLimit:)`` が返し、
-/// ``RetryingTransport`` がスリープしてリトライするか、
-/// エラー/レスポンスを呼び出し元へ伝播するかを決定する。
+/// Returned by ``RetryPolicy/decision(status:error:attempt:rateLimit:)`` and
+/// acted on by ``RetryingTransport``, which either sleeps and sends again, or
+/// hands the last response or error back to the caller.
 public enum RetryDecision: Sendable, Equatable {
-    /// 指定された秒数スリープしてから再度リクエストを発行する。
+    /// Wait the given number of seconds, then send the same request again.
     case retry(after: TimeInterval)
-    /// リトライせず、レスポンスまたはエラーをそのまま伝播する。
+    /// Give up and propagate whatever the last attempt produced.
     case stop
 }
 
-/// スタック全体で使用するリトライポリシーの唯一の抽象。
+/// The single place that decides whether a failed attempt is repeated.
 ///
-/// HTTP ステータス・トランスポートエラー・レート制限スナップショットをもとに
-/// 試行ごとにリトライ可否を判断する。
-/// 以前重複していたステータス基準・エラー基準の両ポリシーを統合する。
+/// One policy sees all three inputs — HTTP status, thrown transport error, and
+/// parsed rate-limit headers — so status-driven and error-driven rules cannot
+/// drift apart the way two separate policies did.
 public protocol RetryPolicy: Sendable {
-    /// 最大試行回数（初回 + リトライの合計）。
+    /// Total attempts allowed including the first, so `1` disables retrying.
     var maxAttempts: Int { get }
 
-    /// 1 回の試行完了後にリトライ可否を返す。
+    /// Decides what happens after one attempt has completed.
+    ///
+    /// Exactly one of `status` and `error` is non-`nil`: a response came back,
+    /// or it did not. Note that a policy sees no part of the request, so it
+    /// cannot distinguish a safe retry from an unsafe one.
     ///
     /// - Parameters:
-    ///   - status: レスポンスの HTTP ステータスコード。トランスポートエラー（ネットワークエラー・キャンセル）の場合は `nil`。
-    ///   - error: `status` が `nil` の場合にスローされたエラー。レスポンスがある場合は `nil`。
-    ///   - attempt: 完了した試行の 1-based インデックス（1 = 初回試行）。
-    ///   - rateLimit: レスポンスから解析したレート制限ヘッダ情報（あれば）。
-    /// - Returns: ``RetryDecision/retry(after:)`` または ``RetryDecision/stop``。
+    ///   - status: The response status, or `nil` when the attempt threw.
+    ///   - error: The error thrown, or `nil` when a response came back.
+    ///   - attempt: Which attempt just finished, counting from 1.
+    ///   - rateLimit: Quota headers parsed from the response, when there was
+    ///     one and a mapping was configured.
+    /// - Returns: Whether to send again, and after how long.
     func decision(
         status: Int?,
         error: (any Error)?,
@@ -37,7 +42,7 @@ public protocol RetryPolicy: Sendable {
     ) -> RetryDecision
 }
 
-/// リトライを一切行わないポリシー。
+/// A policy that never retries: the first outcome is final.
 public struct NoRetry: RetryPolicy {
     public let maxAttempts = 1
     public init() {}
@@ -46,13 +51,27 @@ public struct NoRetry: RetryPolicy {
     }
 }
 
-/// ジッタ付き指数バックオフ。`Retry-After` / レート制限リセット値を尊重する。
+/// Doubling backoff that defers to `Retry-After` whenever the server sent one.
 ///
-/// 408/425/429 および 5xx、トランスポート（ネットワーク）エラーでリトライする。
+/// Retries 408, 425, 429 and 5xx by default, plus any thrown transport error.
+/// The delay doubles per attempt, is capped at ``maxDelay``, then has a flat
+/// quarter subtracted. That subtraction is constant, not random, so clients
+/// that fail together will also retry together.
+///
+/// A `Retry-After` value wins over the computed delay and is used as given,
+/// capped at ``maxDelay``.
 public struct ExponentialBackoff: RetryPolicy {
     public let maxAttempts: Int
+
+    /// Delay before the second attempt, doubled for each attempt after that.
     public var baseDelay: TimeInterval
+
+    /// Ceiling for any wait, applied to computed delays and `Retry-After` alike.
     public var maxDelay: TimeInterval
+
+    /// Statuses worth another attempt.
+    ///
+    /// Assigning replaces the default set outright rather than adding to it.
     public var retryableStatuses: Set<Int>
 
     public init(
@@ -80,23 +99,35 @@ public struct ExponentialBackoff: RetryPolicy {
     }
 }
 
-/// レート制限ヘッダを解析しながらリトライ処理を付与するトランスポートデコレータ。
+/// A decorator that re-sends failed requests according to a policy.
 ///
-/// プロバイダごとのリトライループをトランスポート層に集約する。
-/// `sleep` はテスト時に差し替え可能。
+/// Retrying lives here instead of in every caller, so everything routed through
+/// the stack retries the same way. Rate-limit headers are read from each
+/// response and passed to the policy, which may honour them in place of its own
+/// backoff.
+///
+/// Two things to know before wrapping a transport in this:
+///
+/// - Only ``HTTPTransport`` is implemented. Wrapping a streaming transport does
+///   not make ``HTTPStreamingTransport/stream(_:)`` retry.
+/// - The request is replayed unchanged whatever its method, so a non-idempotent
+///   request can reach the server more than once.
 public struct RetryingTransport: HTTPTransport {
     public let base: any HTTPTransport
     public let policy: any RetryPolicy
     public let rateLimitMapping: RateLimitHeaderMapping?
     private let sleep: @Sendable (TimeInterval) async throws -> Void
 
-    /// リトライデコレータを初期化する。
+    /// Wraps a transport so its failures are retried.
     ///
     /// - Parameters:
-    ///   - base: リクエストを実際に送信する下位トランスポート。
-    ///   - policy: リトライ可否と待機時間を決定するポリシー。
-    ///   - rateLimitMapping: レート制限ヘッダの解析設定。`nil` の場合はレート制限情報を参照しない。
-    ///   - sleep: 待機処理の実装。デフォルトは `Task.sleep`。テスト時は即時返却するクロージャを渡して時間を制御できる注入ポイント。
+    ///   - base: The transport that actually sends the request.
+    ///   - policy: Decides whether to retry and how long to wait.
+    ///   - rateLimitMapping: Which header names carry quota information. When
+    ///     `nil`, the policy is never given a rate-limit snapshot.
+    ///   - sleep: How to wait between attempts. Defaults to `Task.sleep`; pass
+    ///     a closure that returns immediately to run the backoff schedule in
+    ///     tests without real delay.
     public init(
         base: any HTTPTransport,
         policy: any RetryPolicy,

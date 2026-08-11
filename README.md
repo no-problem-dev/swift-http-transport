@@ -2,85 +2,73 @@ English | [日本語](./README.ja.md)
 
 # swift-http-transport
 
-The single raw-HTTP seam for the NOPROBLEM stack. Places `URLSession` behind a
-protocol and centralises retry, rate-limit parsing, and SSE decoding so that
-higher layers (swift-api-client, providers) depend only on this abstraction.
+The single raw-HTTP seam for the NOPROBLEM stack: `URLSession` behind a
+protocol, with retry, rate-limit parsing, and SSE decoding in one place.
 
-## Installation
+## Overview
 
-Add to `Package.swift`:
+Everything above this package depends on the `HTTPTransport` protocol rather
+than on `URLSession`. That buys four things:
 
-```swift
-.package(url: "https://github.com/no-problem-dev/swift-http-transport", from: "1.0.0")
-```
+- **One retry rule.** `RetryingTransport` wraps any transport with a policy that
+  sees the status, the thrown error, and the parsed quota headers together —
+  instead of a slightly different retry loop per provider.
+- **Rate limits without per-provider parsing.** A provider declares which header
+  names it uses and how it spells a reset time; the parsing lives here.
+- **SSE that survives real streams.** Frames are split at byte level, so CRLF
+  line endings and multi-byte characters straddling a chunk boundary both decode
+  correctly.
+- **Tests without a network.** `MockTransport` scripts responses and records
+  what was sent.
 
-Add to your target's dependencies:
+An HTTP error status is not a thrown error: 4xx and 5xx come back as ordinary
+responses. Only failures that stop a response from forming throw.
 
-```swift
-.target(name: "MyTarget", dependencies: ["HTTPTransport"])
-```
+Foundation only — no third-party dependencies.
 
 ## Usage
-
-### Basic request
 
 ```swift
 import HTTPTransport
 
 let transport = URLSessionTransport()
-let request = HTTPRequest(method: "GET", url: URL(string: "https://api.example.com/data")!)
-let response = try await transport.send(request)
-if response.isSuccess {
-    // use response.body
-}
-```
-
-### Retry
-
-```swift
-let transport = RetryingTransport(
-    base: URLSessionTransport(),
-    policy: ExponentialBackoff(maxAttempts: 3),
-    rateLimitMapping: RateLimitHeaderMapping(
-        remainingRequests: "x-ratelimit-remaining-requests",
-        requestsReset: "x-ratelimit-reset-requests",
-        resetFormat: .durationSuffix
-    )
+let response = try await transport.send(
+    HTTPRequest(method: "GET", url: URL(string: "https://api.example.com/data")!)
 )
-```
-
-### Server-Sent Events
-
-```swift
-let transport = URLSessionTransport()
-let request = HTTPRequest(method: "POST", url: url, headers: ["Accept": "text/event-stream"])
-for try await event in transport.sseEvents(request) {
-    print(event.data)
+if response.isSuccess {
+    // response.body
 }
 ```
 
-### Testing
+Composing retry, streaming server-sent events, and testing against a mock are
+covered in the documentation.
+
+## Documentation
+
+[API reference and guides](https://no-problem-dev.github.io/swift-http-transport/documentation/httptransport)
+
+## Requirements
+
+Swift 6.2 · iOS 17 · macOS 14 · tvOS 17 · watchOS 10 · visionOS 1
+
+## Installation
+
+Add the package to `Package.swift`:
 
 ```swift
-let mock = MockTransport(status: 200, body: Data("{\"ok\":true}".utf8))
-let response = try await mock.send(request)
-print(mock.recordedRequests.count) // 1
+.package(url: "https://github.com/no-problem-dev/swift-http-transport", from: "1.0.0")
 ```
 
-## Module overview
+Then add the product to your target:
 
-| Type | Role |
-|---|---|
-| `HTTPTransport` / `HTTPStreamingTransport` | Core protocols (`send` / `stream`) |
-| `URLSessionTransport` | Default concrete implementation (`URLSession`-backed) |
-| `MockTransport` | Deterministic testing (scripted/closure responses, request recording) |
-| `RetryPolicy` / `ExponentialBackoff` / `NoRetry` | Single retry abstraction (status + error + rate-limit) |
-| `RetryingTransport` | Decorator that centralises retry at the transport layer |
-| `RateLimitHeaderMapping` / `RateLimitSnapshot` | Rate-limit extraction via header-name mapping (seconds / milliseconds / RFC 3339 / duration suffix) |
-| `SSEParser` / `SSEEvent` / `sseEvents(_:)` | WHATWG SSE frame splitting and decoding |
+```swift
+.target(name: "MyTarget", dependencies: ["HTTPTransport"])
+```
 
-`HTTPRequest` / `HTTPResponse` / `HTTPHeaders` (case-insensitive, insertion-ordered) are minimal Foundation value types.
+## Contributing
+
+See [CONTRIBUTING.md](./CONTRIBUTING.md).
 
 ## License
 
-MIT
+MIT — see [LICENSE](./LICENSE).

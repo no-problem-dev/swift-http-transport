@@ -1,16 +1,29 @@
 import Foundation
 
-/// プロバイダのレート制限ヘッダを解析したスナップショット。
+/// What one response said about the caller's remaining quota.
+///
+/// Every field is optional because providers send different subsets, and any
+/// field the mapping did not name or could not parse stays `nil`.
 public struct RateLimitSnapshot: Sendable, Equatable {
-    /// `Retry-After` ヘッダに基づく待機秒数。
+    /// How long the server asked the caller to wait, from `Retry-After`.
+    ///
+    /// Only the plain-seconds form is understood; the HTTP-date form parses as
+    /// `nil`. A policy that honours this generally uses it instead of its own
+    /// backoff.
     public var retryAfter: TimeInterval?
-    /// API リクエスト（HTTP コール数）の残余クォータ。`remainingTokens` とは独立したカウンタ。
+
+    /// Calls left in the current window, counted separately from ``remainingTokens``.
     public var remainingRequests: Int?
-    /// API リクエストクォータのリセットまでの残り秒数。
+
+    /// Seconds until the call quota refills.
     public var requestsReset: TimeInterval?
-    /// LLM トークン（入出力トークン数の合算）の残余クォータ。`remainingRequests` とは独立したカウンタ。
+
+    /// Model tokens left in the current window, input and output combined.
+    ///
+    /// A separate counter from ``remainingRequests``: either can run out first.
     public var remainingTokens: Int?
-    /// LLM トークンクォータのリセットまでの残り秒数。
+
+    /// Seconds until the token quota refills.
     public var tokensReset: TimeInterval?
 
     public init(
@@ -27,27 +40,33 @@ public struct RateLimitSnapshot: Sendable, Equatable {
         self.tokensReset = tokensReset
     }
 
-    /// 全フィールドが `nil` のとき `true`。ヘッダに認識できる値が 1 件もなかったことを示す。
+    /// Whether nothing at all was recognised in the headers.
+    ///
+    /// Distinguishes "this response carried no quota information" from "the
+    /// quota is exhausted", which otherwise look alike.
     public var isEmpty: Bool {
         retryAfter == nil && remainingRequests == nil && requestsReset == nil
             && remainingTokens == nil && tokensReset == nil
     }
 }
 
-/// プロバイダのヘッダ名を ``RateLimitSnapshot`` へ変換する宣言的マッピング。
+/// A declaration of which header names a given provider uses for its quota.
 ///
-/// プロバイダごとに実装していたレート制限抽出ロジックを一本化する。
-/// プロバイダはヘッダ名とリセット形式を指定するだけでよく、解析ロジックはここに集約される。
+/// Providers differ only in what they call these headers and how they spell a
+/// reset time. Stating those two facts keeps the parsing itself in one place
+/// instead of once per provider.
 public struct RateLimitHeaderMapping: Sendable {
-    /// ヘッダ値のリセット時間形式。プロバイダごとに異なる表現を統一的に扱う。
+    /// How a provider expresses the moment a quota refills.
     public enum ResetFormat: Sendable {
-        /// リセットまでの残り秒数。
+        /// Seconds remaining until reset.
         case secondsRemaining
-        /// リセットまでの残りミリ秒数。
+        /// Milliseconds remaining until reset.
         case millisecondsRemaining
-        /// RFC 3339 の絶対タイムスタンプ。現在時刻からの秒数に変換する。
+        /// An absolute RFC 3339 timestamp, converted to seconds from now.
+        ///
+        /// Goes negative if the window already reset before the value was read.
         case rfc3339
-        /// `1s` / `6m0s` 形式の duration suffix（Anthropic/OpenAI スタイル）。
+        /// A Go-style duration such as `1s` or `6m0s`, as Anthropic and OpenAI send.
         case durationSuffix
     }
 
@@ -56,6 +75,9 @@ public struct RateLimitHeaderMapping: Sendable {
     public var requestsReset: String?
     public var remainingTokens: String?
     public var tokensReset: String?
+
+    /// How to read the two reset fields. Does not affect ``retryAfter``, which
+    /// is always parsed as plain seconds.
     public var resetFormat: ResetFormat
 
     public init(
@@ -74,14 +96,14 @@ public struct RateLimitHeaderMapping: Sendable {
         self.resetFormat = resetFormat
     }
 
-    /// ヘッダを解析して ``RateLimitSnapshot`` を返す。
+    /// Reads the mapped headers into a snapshot.
     ///
-    /// マッピングに登録されたヘッダ名を探索し、対応するフィールドを抽出する。
-    /// ヘッダが存在しない・解析不能なフィールドは `nil` のままになるが、
-    /// 戻り値は常に非 Optional の ``RateLimitSnapshot``（全フィールドが解析不能でも `nil` を返さない）。
+    /// Missing and unparseable fields are left `nil` rather than failing, so
+    /// this never returns an optional and never throws. Consult
+    /// ``RateLimitSnapshot/isEmpty`` to tell an absent quota from an exhausted one.
     ///
-    /// - Parameter headers: レスポンスの HTTP ヘッダ。
-    /// - Returns: 解析結果を格納したスナップショット。全フィールドが解析不能な場合は ``RateLimitSnapshot/isEmpty`` が `true`。
+    /// - Parameter headers: The response headers to read.
+    /// - Returns: Whatever could be parsed, with the rest left `nil`.
     public func extract(from headers: HTTPHeaders) -> RateLimitSnapshot {
         var snapshot = RateLimitSnapshot()
         if let name = retryAfter, let value = headers[name] { snapshot.retryAfter = TimeInterval(value) }
@@ -110,7 +132,10 @@ public struct RateLimitHeaderMapping: Sendable {
         }
     }
 
-    /// `1s`・`6m0s`・`1m30s`・`500ms` のような Go スタイルの duration 文字列を解析する。
+    /// Sums a Go-style duration such as `1s`, `6m0s`, `1m30s`, or `500ms`.
+    ///
+    /// Returns `nil` only when no number-and-unit pair was found at all; a
+    /// trailing fragment that fails to parse keeps whatever came before it.
     static func parseDuration(_ text: String) -> TimeInterval? {
         var total: TimeInterval = 0
         var number = ""

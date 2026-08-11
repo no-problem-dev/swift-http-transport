@@ -1,44 +1,71 @@
 import Foundation
 
-/// HTTP リクエストを送信して完全なレスポンスを待機するための唯一の接合点。
+/// The one seam through which a request is sent and a whole response awaited.
 ///
-/// 上位のすべての層（api-client・各プロバイダ）は `URLSession` ではなくこの抽象にのみ依存する。
-/// トランスポートをモック・デコレータ（リトライ）・別実装へ差し替えても呼び出し元を変更しなくてよい。
+/// Everything above this layer depends on the protocol rather than on
+/// `URLSession`, so the transport can be swapped for a mock, wrapped in a
+/// decorator such as ``RetryingTransport``, or replaced outright without any
+/// call site changing.
 public protocol HTTPTransport: Sendable {
-    /// HTTP リクエストを送信し、完全なレスポンスを返す。
+    /// Sends a request and waits for the complete response.
     ///
-    /// HTTP ステータスコードはエラーとして扱わず ``HTTPResponse/status`` に含まれる。
-    /// ステータスに応じた処理が必要な場合は ``HTTPResponse/isSuccess`` を確認する。
-    /// ネットワーク障害・キャンセル・非 HTTP レスポンスの場合は ``TransportError`` をスローする。
-    /// ストリーミング時の 2xx 以外ステータスで ``HTTPStatusError`` をスローする ``HTTPStreamingTransport/stream(_:)`` とは異なる。
+    /// An HTTP status is not an error here. A 404 or a 500 comes back as an
+    /// ordinary ``HTTPResponse``; check ``HTTPResponse/isSuccess`` before
+    /// treating the body as a success payload. Only failures that stop a
+    /// response from forming at all are thrown.
     ///
-    /// - Parameter request: 送信するリクエスト。
-    /// - Returns: サーバーから受信した完全な HTTP レスポンス。
-    /// - Throws: ``TransportError``（ネットワーク障害・キャンセル・非 HTTP レスポンス等）。
+    /// The body is fully buffered in memory before this returns. This is the
+    /// opposite of ``HTTPStreamingTransport/stream(_:)``, which delivers bytes
+    /// as they arrive and does throw on a non-2xx status.
+    ///
+    /// - Parameter request: The request to send.
+    /// - Returns: The complete response, non-2xx ones included.
+    /// - Throws: ``TransportError`` on network failure, on cancellation, or
+    ///   when the reply is not an HTTP response.
     func send(_ request: HTTPRequest) async throws -> HTTPResponse
 }
 
-/// ストリーミング版トランスポート。届いた生バイト列をチャンク単位で逐次返す（SSE 等に使用）。
+/// A transport that hands back body bytes as they arrive instead of buffering.
 public protocol HTTPStreamingTransport: Sendable {
-    /// HTTP リクエストを送信し、レスポンスボディをチャンク単位で逐次 yield する `AsyncThrowingStream` を返す。
+    /// Sends a request and yields the response body in chunks as it arrives.
     ///
-    /// SSE など長命なバイトストリームに使用する。
-    /// 全バイトを受信するとストリームは正常終了する。
-    /// サーバーが 2xx 以外のステータスを返した場合は ``HTTPStatusError`` をスローし、
-    /// ネットワーク障害・キャンセルの場合は ``TransportError`` をスローする。
+    /// Meant for long-lived bodies such as server-sent events. The stream
+    /// finishes normally once every byte has been delivered.
     ///
-    /// - Parameter request: 送信するリクエスト。
-    /// - Returns: レスポンスボディを随時 yield する `AsyncThrowingStream<Data, Error>`。
+    /// A non-2xx status fails the stream with ``HTTPStatusError`` and no chunk
+    /// is ever yielded — the error body is drained in full first, so a large
+    /// error page is held in memory before the throw. Network failure and
+    /// cancellation fail the stream with ``TransportError``.
+    ///
+    /// Ending the returned stream — breaking out of the loop, or cancelling the
+    /// surrounding task — cancels the underlying request.
+    ///
+    /// - Parameter request: The request to send.
+    /// - Returns: A stream of body chunks, each flushed at roughly 4 KB.
     func stream(_ request: HTTPRequest) -> AsyncThrowingStream<Data, Error>
 }
 
-/// `URLSession` を背後に持つ標準の具象トランスポート。
+/// The production transport, backed by `URLSession`.
 public struct URLSessionTransport: HTTPTransport, HTTPStreamingTransport {
-    /// すべてのリクエストで使用する `URLSession`。
+    /// The session carrying every request, buffered and streamed alike.
+    ///
+    /// Pass a configured session to install a `URLProtocol` stub in tests, or
+    /// to change caching, proxy, and connection-reuse behaviour.
     public let session: URLSession
-    /// ``HTTPRequest/timeout`` を指定しないリクエストに適用するデフォルトタイムアウト。
+
+    /// Timeout in seconds for requests that do not carry one of their own.
+    ///
+    /// A request's own ``HTTPRequest/timeout`` always wins. This maps to
+    /// `URLRequest.timeoutInterval`, which bounds the wait for *more data*
+    /// rather than the total call, so a slowly trickling response can outlive
+    /// it without ever timing out.
     public var defaultTimeout: TimeInterval
 
+    /// Creates a transport over the given session.
+    ///
+    /// - Parameters:
+    ///   - session: The session to send through. Defaults to `URLSession.shared`.
+    ///   - defaultTimeout: Fallback timeout for requests that omit their own.
     public init(session: URLSession = .shared, defaultTimeout: TimeInterval = 60) {
         self.session = session
         self.defaultTimeout = defaultTimeout
@@ -113,7 +140,11 @@ public struct URLSessionTransport: HTTPTransport, HTTPStreamingTransport {
     }
 }
 
-/// ストリーミング時にサーバーが 2xx 以外のステータスを返した場合にスローされるエラー。
+/// The failure a stream reports when the server answered with a non-2xx status.
+///
+/// Only ``HTTPStreamingTransport/stream(_:)`` throws this; the buffered
+/// ``HTTPTransport/send(_:)`` path returns a non-2xx as a normal response
+/// instead. The body is the complete error payload, drained before the throw.
 public struct HTTPStatusError: Error, Sendable {
     public let status: Int
     public let headers: HTTPHeaders

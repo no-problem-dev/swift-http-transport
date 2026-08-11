@@ -2,11 +2,11 @@ import Foundation
 import Testing
 @testable import HTTPTransport
 
-/// ``ExponentialBackoff/decision(status:error:attempt:rateLimit:)`` は純関数。
-/// バックオフ曲線・上限・ジッタ・打ち切りをテーブルで検証する。
+/// Table-driven checks of the backoff curve, its ceiling, the flat reduction,
+/// and where it gives up. The decision function is pure, so no I/O is needed.
 struct ExponentialBackoffTests {
-    /// baseDelay 0.5・maxDelay 30 のデフォルト曲線。
-    /// delay = min(0.5 × 2^(attempt−1), 30) × 0.75（ジッタは固定 25% 減）。
+    /// The default curve at baseDelay 0.5 and maxDelay 30:
+    /// delay = min(0.5 x 2^(attempt-1), 30) x 0.75, the 25% cut being constant.
     private let policy = ExponentialBackoff(maxAttempts: 10, baseDelay: 0.5, maxDelay: 30)
 
     @Test(arguments: [
@@ -24,7 +24,7 @@ struct ExponentialBackoffTests {
 
     @Test(arguments: [7, 8, 9])
     func delayIsCappedAtMaxDelayBeforeJitter(_ attempt: Int) {
-        // 0.5 × 2^6 = 32 > maxDelay 30 → 30 × 0.75 = 22.5 で頭打ち
+        // 0.5 x 2^6 = 32 exceeds maxDelay 30, so it pins at 30 x 0.75 = 22.5
         let decision = policy.decision(status: 500, error: nil, attempt: attempt, rateLimit: nil)
         #expect(decision == .retry(after: 22.5))
     }
@@ -85,7 +85,8 @@ struct ExponentialBackoffTests {
     }
 }
 
-/// エラー throw 経路での ``RetryingTransport`` の再試行挙動。
+/// How ``RetryingTransport`` behaves when the base transport throws rather
+/// than answering with a failing status.
 struct RetryingTransportErrorPathTests {
     private let url = URL(string: "https://example.com/v1")!
 
@@ -116,7 +117,7 @@ struct RetryingTransportErrorPathTests {
             #expect((error as? URLError)?.code == .cannotFindHost)
         }
         #expect(transport.recordedRequests.count == 3)
-        #expect(sleeps.recorded == [0.375, 0.75]) // バックオフ曲線どおりに 2 回スリープ
+        #expect(sleeps.recorded == [0.375, 0.75]) // two waits, following the backoff curve
     }
 
     @Test

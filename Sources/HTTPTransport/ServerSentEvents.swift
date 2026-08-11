@@ -1,14 +1,23 @@
 import Foundation
 
-/// WHATWG `text/event-stream` 形式のデコード済み SSE フレーム。
+/// One decoded frame from a `text/event-stream` body.
 public struct SSEEvent: Sendable, Equatable {
-    /// イベントタイプ名。デフォルトの `"message"` イベントの場合は `nil`。
+    /// The event type, or `nil` when the frame carried no `event:` field.
     public var event: String?
-    /// イベントのペイロード。複数の `data:` 行は `\n` で結合される。
+
+    /// The payload, with repeated `data:` lines joined by newlines per the spec.
     public var data: String
-    /// 再接続時に使用するラストイベント ID。
+
+    /// The last event ID seen.
+    ///
+    /// Carries forward from earlier frames until the server sends a new one, so
+    /// this can be set on a frame that had no `id:` field of its own.
     public var id: String?
-    /// サーバーからの再接続時間ヒント（ミリ秒）。WHATWG SSE 仕様の `retry:` フィールドに対応。``RetryPolicy`` とは無関係。
+
+    /// The server's reconnection hint in milliseconds.
+    ///
+    /// This is the SSE `retry:` field and is unrelated to ``RetryPolicy``.
+    /// Nothing in this package reconnects, so acting on it is the caller's job.
     public var retry: Int?
 
     public init(event: String? = nil, data: String, id: String? = nil, retry: Int? = nil) {
@@ -19,17 +28,20 @@ public struct SSEEvent: Sendable, Equatable {
     }
 }
 
-/// インクリメンタル SSE フレームパーサ。生バイトを受け取り、完成したイベントを返す。
+/// An incremental parser turning raw bytes into complete SSE frames.
 ///
-/// 行境界で分割し、空行でイベントをディスパッチする。
-/// 複数の `data:` 行は仕様に従い `\n` で結合する。
-/// イベントのプロバイダ固有の意味解釈は上位層が担う。
+/// Feed it whatever arrives, in whatever sizes it arrives; it splits on line
+/// boundaries and emits a frame at each blank line. Repeated `data:` lines are
+/// joined with newlines as the spec requires. What a frame *means* to a given
+/// provider is for a higher layer to decide.
 public struct SSEParser: Sendable {
-    /// 生バイトのままバッファする。行分割は必ずバイトレベルで行う —
-    /// Swift の String は `\r\n` を 1 書記素として扱うため、String に対する
-    /// `firstIndex(of: "\n")` は CRLF 行末のストリームで行境界を一切検出できない。
-    /// バイト保持は UTF-8 マルチバイト文字がチャンク境界で分断されるケースも
-    /// 同時に解決する（String 変換は完成した行に対してのみ行う）。
+    /// Buffers raw bytes, because line splitting has to happen at byte level.
+    ///
+    /// Swift treats CR-LF as a single grapheme, so searching a `String` for a
+    /// newline finds no line breaks at all in a CRLF stream. That bug shipped
+    /// once and produced zero events from a perfectly valid response. Holding
+    /// bytes also handles a multi-byte UTF-8 character split across a chunk
+    /// boundary; only completed lines are ever decoded to text.
     private var buffer: [UInt8] = []
     private var event: String?
     private var dataLines: [String] = []
@@ -38,14 +50,14 @@ public struct SSEParser: Sendable {
 
     public init() {}
 
-    /// 受信した生バイトチャンクを内部バッファに追記し、完成したイベントを返す。
+    /// Appends a chunk of received bytes and returns any frames it completed.
     ///
-    /// 内部バッファを行境界（LF。直前の CR は除去 = CRLF 対応）で分割し、
-    /// 空行を検出するたびに ``SSEEvent`` をディスパッチする。
-    /// 1 回の呼び出しで複数のイベントが完成している場合は複数要素を返す。
+    /// Splits the buffer on LF, dropping a preceding CR so CRLF streams work,
+    /// and emits a frame at each blank line. One chunk may complete several
+    /// frames, or none — an incomplete frame stays buffered for the next call.
     ///
-    /// - Parameter chunk: HTTP レスポンスボディから受け取った生バイトのチャンク。
-    /// - Returns: このチャンクで完成した ``SSEEvent`` の配列。完成イベントがなければ空配列。
+    /// - Parameter chunk: Raw bytes from the response body.
+    /// - Returns: The frames completed by this chunk, empty if none were.
     public mutating func consume(_ chunk: Data) -> [SSEEvent] {
         buffer.append(contentsOf: chunk)
         var events: [SSEEvent] = []
@@ -68,8 +80,12 @@ public struct SSEParser: Sendable {
         return events
     }
 
-    /// ストリーム終端で保留中のイベントをフラッシュする。
-    /// 末尾改行なしで終わったストリームの最終行も処理してからフラッシュする。
+    /// Flushes the frame still pending when the stream ends.
+    ///
+    /// A stream that stops without a trailing blank line leaves a complete
+    /// frame in the buffer. Call this once at the end or that frame is lost.
+    ///
+    /// - Returns: The final frame, or `nil` if nothing was pending.
     public mutating func finish() -> SSEEvent? {
         if !buffer.isEmpty {
             var line = buffer[...]
@@ -91,7 +107,7 @@ public struct SSEParser: Sendable {
             event = nil; dataLines = []; retry = nil
             return result
         }
-        if line.hasPrefix(":") { return nil } // comment
+        if line.hasPrefix(":") { return nil } // an SSE comment line, often a keep-alive
         let field: String
         let value: String
         if let colon = line.firstIndex(of: ":") {
@@ -115,7 +131,17 @@ public struct SSEParser: Sendable {
 }
 
 extension HTTPStreamingTransport {
-    /// 生バイトストリームをデコード済みの ``SSEEvent`` ストリームに変換する。
+    /// Decodes a raw byte stream into SSE frames.
+    ///
+    /// Chunk boundaries are absorbed by the parser, so a frame split across two
+    /// network reads still arrives whole, and a stream ending without a blank
+    /// line still yields its last frame. Errors from the byte stream propagate
+    /// unchanged, including ``HTTPStatusError`` for a non-2xx status. Ending
+    /// this stream cancels the underlying request.
+    ///
+    /// - Parameter request: The request to send. Set `Accept` to
+    ///   `text/event-stream` yourself; nothing is added here.
+    /// - Returns: A stream of decoded frames.
     public func sseEvents(_ request: HTTPRequest) -> AsyncThrowingStream<SSEEvent, Error> {
         let byteStream = stream(request)
         return AsyncThrowingStream { continuation in
