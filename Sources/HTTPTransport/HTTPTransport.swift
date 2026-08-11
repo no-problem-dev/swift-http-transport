@@ -39,9 +39,10 @@ public protocol HTTPStreamingTransport: Sendable {
     /// finishes normally once every byte has been delivered.
     ///
     /// A non-2xx status fails the stream with ``HTTPStatusError`` and no chunk
-    /// is ever yielded — the error body is drained in full first, so a large
-    /// error page is held in memory before the throw. Network failure and
-    /// cancellation fail the stream with ``TransportError``.
+    /// is ever yielded. The error payload is collected so it can be reported,
+    /// but only up to a bound — see ``URLSessionTransport/maxErrorBodyBytes`` —
+    /// so the far end cannot answer a stream with an unbounded allocation.
+    /// Network failure and cancellation fail the stream with ``TransportError``.
     ///
     /// Ending the returned stream — breaking out of the loop, or cancelling the
     /// surrounding task — cancels the underlying request.
@@ -67,6 +68,16 @@ public struct URLSessionTransport: HTTPTransport, HTTPStreamingTransport {
     /// it without ever timing out.
     public var defaultTimeout: TimeInterval
 
+    /// How much of a non-2xx body ``stream(_:)`` will hold before giving up on
+    /// the rest.
+    ///
+    /// A streamed error still has to be collected to be reported, and a server
+    /// under load can answer with an error page of any size at all. Past this
+    /// many bytes the request is cancelled and ``HTTPStatusError/body`` carries
+    /// the truncated prefix, so a stream can never be turned into an unbounded
+    /// allocation by the far end.
+    public var maxErrorBodyBytes = 64 * 1024
+
     /// Creates a transport over the given session.
     ///
     /// - Parameters:
@@ -85,60 +96,49 @@ public struct URLSessionTransport: HTTPTransport, HTTPStreamingTransport {
             return HTTPResponse(status: http.statusCode, headers: Self.headers(from: http), body: data)
         } catch let error as TransportError {
             throw error
-        } catch is CancellationError {
-            throw TransportError.cancelled
         } catch {
-            throw TransportError.network(error)
+            throw Self.transportError(from: error)
         }
+    }
+
+    /// Classifies a failure from the URL loading system.
+    ///
+    /// Cancellation reaches us as `URLError.cancelled`, not as a
+    /// `CancellationError`: `URLSession`'s async methods cancel the underlying
+    /// task and report the loading system's own error. Matching only
+    /// `CancellationError` therefore left ``TransportError/cancelled``
+    /// unreachable and handed callers a `URLError -999` wrapped in
+    /// ``TransportError/network(_:)`` instead.
+    fileprivate static func transportError(from error: any Error) -> TransportError {
+        if error is CancellationError { return .cancelled }
+        if let urlError = error as? URLError, urlError.code == .cancelled { return .cancelled }
+        return .network(error)
     }
 
     public func stream(_ request: HTTPRequest) -> AsyncThrowingStream<Data, Error> {
         let urlRequest = makeURLRequest(request)
-        #if canImport(FoundationNetworking)
-        return streamViaDelegate(urlRequest)
-        #else
-        return streamViaAsyncBytes(urlRequest)
-        #endif
-    }
-
-    #if !canImport(FoundationNetworking)
-    /// Streams through `URLSession.AsyncBytes`, which only Apple's Foundation provides.
-    private func streamViaAsyncBytes(_ urlRequest: URLRequest) -> AsyncThrowingStream<Data, Error> {
         let session = self.session
+        let errorLimit = maxErrorBodyBytes
         return AsyncThrowingStream { continuation in
-            let task = Task {
-                do {
-                    let (bytes, response) = try await session.bytes(for: urlRequest)
-                    guard let http = response as? HTTPURLResponse else { throw TransportError.invalidResponse }
-                    guard (200..<300).contains(http.statusCode) else {
-                        var body = Data()
-                        for try await byte in bytes { body.append(byte) }
-                        throw HTTPStatusError(status: http.statusCode, headers: Self.headers(from: http), body: body)
-                    }
-                    var buffer = Data()
-                    for try await byte in bytes {
-                        buffer.append(byte)
-                        if buffer.count >= Self.chunkSize {
-                            continuation.yield(buffer)
-                            buffer.removeAll(keepingCapacity: true)
-                        }
-                    }
-                    if !buffer.isEmpty { continuation.yield(buffer) }
-                    continuation.finish()
-                } catch let error as HTTPStatusError {
-                    continuation.finish(throwing: error)
-                } catch let error as TransportError {
-                    continuation.finish(throwing: error)
-                } catch is CancellationError {
-                    continuation.finish(throwing: TransportError.cancelled)
-                } catch {
-                    continuation.finish(throwing: TransportError.network(error))
-                }
-            }
+            let delegate = StreamingSessionDelegate(
+                continuation: continuation,
+                maxErrorBodyBytes: errorLimit
+            )
+            #if canImport(FoundationNetworking)
+            // swift-corelibs-foundation has no per-task delegate, so a delegate
+            // can only be attached when a session is created. Rebuilding one
+            // from this transport's configuration keeps any URLProtocol stub and
+            // caching policy the caller installed.
+            let delegateSession = URLSession(configuration: session.configuration, delegate: delegate, delegateQueue: nil)
+            let task = delegateSession.dataTask(with: urlRequest)
+            #else
+            let task = session.dataTask(with: urlRequest)
+            task.delegate = delegate
+            #endif
             continuation.onTermination = { _ in task.cancel() }
+            task.resume()
         }
     }
-    #endif
 
     private func makeURLRequest(_ request: HTTPRequest) -> URLRequest {
         var urlRequest = URLRequest(url: request.url)
@@ -161,26 +161,6 @@ public struct URLSessionTransport: HTTPTransport, HTTPStreamingTransport {
 
     /// How much body is gathered before a chunk is handed to the caller.
     fileprivate static let chunkSize = 4096
-
-    #if canImport(FoundationNetworking)
-    /// Streams through the URL loading system's delegate callbacks.
-    ///
-    /// swift-corelibs-foundation has no `URLSession.bytes(for:)`, so the delivery
-    /// the Apple path gets from `AsyncBytes` is rebuilt on the callbacks it does
-    /// provide. The session is rebuilt from this transport's configuration
-    /// because a delegate can only be attached when a session is created, so any
-    /// `URLProtocol` stub or caching policy on the original still applies.
-    private func streamViaDelegate(_ urlRequest: URLRequest) -> AsyncThrowingStream<Data, Error> {
-        let configuration = session.configuration
-        return AsyncThrowingStream { continuation in
-            let delegate = StreamingSessionDelegate(continuation: continuation)
-            let session = URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
-            let task = session.dataTask(with: urlRequest)
-            continuation.onTermination = { _ in task.cancel() }
-            task.resume()
-        }
-    }
-    #endif
 }
 
 /// The failure a stream reports when the server answered with a non-2xx status.
@@ -191,31 +171,55 @@ public struct URLSessionTransport: HTTPTransport, HTTPStreamingTransport {
 public struct HTTPStatusError: Error, Sendable {
     public let status: Int
     public let headers: HTTPHeaders
+
+    /// The error payload, truncated to ``URLSessionTransport/maxErrorBodyBytes``
+    /// when the server sent more than that.
     public let body: Data
+
+    /// Builds a status failure.
+    ///
+    /// Public so callers can fake one — a stubbed streaming transport has no
+    /// other way to reproduce a non-2xx for the code under test.
+    public init(status: Int, headers: HTTPHeaders, body: Data) {
+        self.status = status
+        self.headers = headers
+        self.body = body
+    }
 }
 
-#if canImport(FoundationNetworking)
-/// Carries one streamed request on platforms whose `URLSession` lacks `bytes(for:)`.
+/// Carries one streamed request, on every platform.
 ///
-/// The observable contract matches the Apple path exactly: body arrives in
-/// chunks of roughly ``URLSessionTransport/chunkSize``, a non-2xx status drains
-/// the whole error body before failing with ``HTTPStatusError``, a reply that is
-/// not HTTP fails with ``TransportError/invalidResponse``, and cancelling the
-/// surrounding task surfaces as ``TransportError/cancelled``.
+/// This is the single implementation of streaming. It used to be the fallback
+/// for platforms lacking `URLSession.bytes(for:)`, with Apple served by an
+/// `AsyncBytes` loop that appended one byte at a time — roughly ten thousand
+/// awaits per ten kilobytes — and that drained an entire error body before
+/// throwing. Two implementations of one contract also drifted: only this one
+/// ever mapped a cancelled task to ``TransportError/cancelled``. The delegate
+/// callbacks hand over `Data` as it arrives, so this path needs neither the
+/// per-byte loop nor a second copy of the rules.
+///
+/// The contract: body arrives in chunks of at most
+/// ``URLSessionTransport/chunkSize``, a non-2xx fails with ``HTTPStatusError``
+/// carrying at most ``URLSessionTransport/maxErrorBodyBytes`` of the error
+/// payload and yields no chunk, a reply that is not HTTP fails with
+/// ``TransportError/invalidResponse``, and cancellation surfaces as
+/// ``TransportError/cancelled``.
 ///
 /// State is reached from the delegate queue and from `onTermination`, so it is
 /// guarded by a lock rather than by an actor — the delegate methods are
 /// synchronous and cannot await isolation.
 private final class StreamingSessionDelegate: NSObject, URLSessionDataDelegate, @unchecked Sendable {
     private let continuation: AsyncThrowingStream<Data, Error>.Continuation
+    private let maxErrorBodyBytes: Int
     private let lock = NSLock()
     private var status: Int?
     private var headers = HTTPHeaders()
     private var buffer = Data()
     private var isSuccess = true
 
-    init(continuation: AsyncThrowingStream<Data, Error>.Continuation) {
+    init(continuation: AsyncThrowingStream<Data, Error>.Continuation, maxErrorBodyBytes: Int) {
         self.continuation = continuation
+        self.maxErrorBodyBytes = max(0, maxErrorBodyBytes)
     }
 
     func urlSession(
@@ -237,32 +241,59 @@ private final class StreamingSessionDelegate: NSObject, URLSessionDataDelegate, 
         completionHandler(.allow)
     }
 
+    /// What arriving bytes should cause, decided under the lock and acted on
+    /// outside it.
+    private enum Delivery {
+        case chunks([Data])
+        case truncatedError(HTTPStatusError)
+    }
+
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
         // The buffer is drained in fixed slices rather than handed over whole, so
-        // that one large delegate callback still arrives as the same sequence of
-        // roughly-4 KB chunks the byte-wise Apple path produces.
+        // that one large delegate callback still arrives as a sequence of
+        // 4 KB chunks rather than as a single allocation the size of the read.
         //
-        // An error body is held back instead, so it can travel whole inside
-        // HTTPStatusError, which is why only the success path drains here.
-        let chunks: [Data] = lock.withLock {
+        // An error body is held back instead, so it can travel inside
+        // HTTPStatusError, which is why only the success path drains here — and
+        // why only the error path needs a ceiling.
+        let delivery: Delivery = lock.withLock {
             buffer.append(data)
-            guard isSuccess else { return [] }
+            guard isSuccess else {
+                guard buffer.count > maxErrorBodyBytes, let status else { return .chunks([]) }
+                let truncated = Data(buffer.prefix(maxErrorBodyBytes))
+                buffer.removeAll()
+                return .truncatedError(
+                    HTTPStatusError(status: status, headers: headers, body: truncated)
+                )
+            }
             var chunks: [Data] = []
             while buffer.count >= URLSessionTransport.chunkSize {
                 chunks.append(Data(buffer.prefix(URLSessionTransport.chunkSize)))
                 buffer.removeFirst(URLSessionTransport.chunkSize)
             }
-            return chunks
+            return chunks.isEmpty ? .chunks([]) : .chunks(chunks)
         }
-        for chunk in chunks { continuation.yield(chunk) }
+        switch delivery {
+        case .chunks(let chunks):
+            for chunk in chunks { continuation.yield(chunk) }
+        case .truncatedError(let error):
+            // Report what was read and stop reading; the completion callback
+            // that the cancellation triggers finds the stream already finished.
+            continuation.finish(throwing: error)
+            dataTask.cancel()
+        }
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: (any Error)?) {
+        #if canImport(FoundationNetworking)
+        // Only the Linux path owns its session. On Apple the delegate is
+        // attached per task, so the session belongs to the caller and
+        // invalidating it would tear down every other request on it.
         defer { session.finishTasksAndInvalidate() }
+        #endif
 
         if let error {
-            let isCancellation = (error as? URLError)?.code == .cancelled
-            continuation.finish(throwing: isCancellation ? .cancelled : TransportError.network(error))
+            continuation.finish(throwing: URLSessionTransport.transportError(from: error))
             return
         }
 
@@ -283,4 +314,3 @@ private final class StreamingSessionDelegate: NSObject, URLSessionDataDelegate, 
         continuation.finish()
     }
 }
-#endif

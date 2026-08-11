@@ -5,6 +5,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- **BREAKING** — `RetryingTransport` is generic over its base, so wrapping a streaming transport
+  keeps `stream`/`sseEvents` instead of silently dropping them. A caller holding
+  `any HTTPTransport` can no longer wrap it directly; that is the cost of the compiler enforcing
+  the capability rather than it disappearing at run time.
+- `HTTPHeaders.init(_:)` now enforces uniqueness. `URLSession` folds repeated field names into one
+  comma-joined value before this package sees them, so a multimap would promise access to values
+  that cannot be recovered.
+
+### Fixed
+
+- **The retry jitter was a constant.** `backoff * 0.25` then `backoff - jitter` is `0.75 × backoff`
+  every time, despite the name — five calls produced five identical delays. Clients that fail
+  together retried together, which is the thundering herd the jitter exists to break up.
+- **A POST that failed was silently re-sent.** Retry looked at the status and the error and never at
+  the method. Replay is now allowed only for idempotent requests, decided per request rather than
+  per policy, and overridable both ways (a POST carrying an idempotency key, a destructive DELETE).
+- **`Equatable` was not reflexive.** `dup == dup` was false, because `==` counted entries and then
+  looked up by name while the initialisers did not dedupe. Fixed in the initialiser: the comparison
+  was only wrong because its precondition was unenforced.
+- **The server's backpressure was discarded.** `Retry-After` was parsed as a bare number, so
+  RFC 9110's HTTP-date form produced `nil` *and* `isEmpty == true` — indistinguishable from no
+  rate-limit headers at all. All three date spellings are read now, and a past deadline reads `0`
+  rather than `nil`, so `isEmpty` means what it says.
+- **`TransportError.cancelled` was unreachable.** `catch is CancellationError` sat after the
+  `URLError` path, so a cancelled task surfaced as `.network(URLError -999)`.
+- **Streaming failures could not be tested.** `MockTransport.stream` ignored `scripted` and
+  `handler`, so a scripted failure completed successfully with zero chunks. That is why the
+  streaming defects above went unnoticed.
+- **`HTTPStatusError` could not be constructed outside the module** — public properties, internal
+  memberwise init — so consumers could not stage a streaming status failure.
+- **An error body was buffered whole on the path that exists to avoid buffering**, byte at a time
+  (~10k awaits per 10 KB). The delegate implementation now serves both platforms; error bodies are
+  capped at `maxErrorBodyBytes`.
+- `MockTransport.recordedRequests` was written under a lock and read without one.
+
+
 ## [1.1.3] - 2026-08-11
 
 ### Changed

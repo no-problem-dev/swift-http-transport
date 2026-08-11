@@ -18,6 +18,8 @@ final class StubURLProtocol: URLProtocol {
         case failure(any Error)
         /// Answer with a bare `URLResponse`, which is not an `HTTPURLResponse`.
         case nonHTTPResponse
+        /// Never answer, so the caller can cancel a request that is in flight.
+        case hang
     }
 
     private static let lock = NSLock()
@@ -55,6 +57,8 @@ final class StubURLProtocol: URLProtocol {
             let response = URLResponse(url: url, mimeType: nil, expectedContentLength: 0, textEncodingName: nil)
             client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
             client?.urlProtocolDidFinishLoading(self)
+        case .hang:
+            break
         }
     }
 
@@ -81,6 +85,92 @@ private func makeStubbedTransport(defaultTimeout: TimeInterval = 60) -> URLSessi
     let configuration = URLSessionConfiguration.ephemeral
     configuration.protocolClasses = [StubURLProtocol.self]
     return URLSessionTransport(session: URLSession(configuration: configuration), defaultTimeout: defaultTimeout)
+}
+
+/// Waits until the stub has actually started loading, so a cancellation lands
+/// on a request that is in flight rather than on one not yet begun.
+private func waitUntilRequestStarted(_ url: URL) async {
+    for _ in 0 ..< 400 {
+        if StubURLProtocol.received(for: url) != nil { return }
+        try? await Task.sleep(nanoseconds: 5_000_000)
+    }
+    Issue.record("スタブがリクエストを受け取らなかった")
+}
+
+/// The cancellation the URL loading system reports for a cancelled task.
+///
+/// It is a `URLError`, never a `CancellationError` — which is why matching only
+/// the latter left ``TransportError/cancelled`` unreachable.
+struct CancellationTests {
+    @Test("cancelling a send surfaces as TransportError.cancelled, not as a network error")
+    func cancellingSendYieldsCancelled() async {
+        let url = URL(string: "https://stub.test/cancel/send")!
+        StubURLProtocol.register(.hang, for: url)
+        let transport = makeStubbedTransport()
+
+        let task = Task { try await transport.send(HTTPRequest(method: "GET", url: url)) }
+        await waitUntilRequestStarted(url)
+        task.cancel()
+
+        switch await task.result {
+        case .success:
+            Issue.record("キャンセルされたのにレスポンスが返った")
+        case .failure(let error):
+            #expect(error as? TransportError != nil)
+            guard case .cancelled? = error as? TransportError else {
+                Issue.record("TransportError.cancelled を期待したが \(error) だった")
+                return
+            }
+        }
+    }
+
+    @Test("a URLError.cancelled from the loading system maps to TransportError.cancelled on send")
+    func urlErrorCancelledMapsToCancelledOnSend() async {
+        let url = URL(string: "https://stub.test/cancel/send-urlerror")!
+        StubURLProtocol.register(.failure(URLError(.cancelled)), for: url)
+        do {
+            _ = try await makeStubbedTransport().send(HTTPRequest(method: "GET", url: url))
+            Issue.record("エラーがスローされるべき")
+        } catch let error as TransportError {
+            guard case .cancelled = error else {
+                Issue.record("TransportError.cancelled を期待したが \(error) だった")
+                return
+            }
+        } catch {
+            Issue.record("TransportError を期待したが \(error) だった")
+        }
+    }
+
+    @Test("the same mapping applies to the streaming path")
+    func urlErrorCancelledMapsToCancelledOnStream() async {
+        let url = URL(string: "https://stub.test/cancel/stream")!
+        StubURLProtocol.register(.failure(URLError(.cancelled)), for: url)
+        do {
+            for try await _ in makeStubbedTransport().stream(HTTPRequest(method: "GET", url: url)) {}
+            Issue.record("エラーがスローされるべき")
+        } catch let error as TransportError {
+            guard case .cancelled = error else {
+                Issue.record("TransportError.cancelled を期待したが \(error) だった")
+                return
+            }
+        } catch {
+            Issue.record("TransportError を期待したが \(error) だった")
+        }
+    }
+
+    @Test("an ordinary network failure is still reported as one")
+    func otherURLErrorsRemainNetworkFailures() async {
+        let url = URL(string: "https://stub.test/cancel/not-cancelled")!
+        StubURLProtocol.register(.failure(URLError(.notConnectedToInternet)), for: url)
+        do {
+            _ = try await makeStubbedTransport().send(HTTPRequest(method: "GET", url: url))
+            Issue.record("エラーがスローされるべき")
+        } catch TransportError.network(let underlying) {
+            #expect((underlying as? URLError)?.code == .notConnectedToInternet)
+        } catch {
+            Issue.record("TransportError.network を期待したが \(error) だった")
+        }
+    }
 }
 
 struct URLSessionTransportSendTests {
@@ -230,6 +320,64 @@ struct URLSessionTransportStreamTests {
         } catch {
             Issue.record("HTTPStatusError を期待したが \(error) がスローされた")
         }
+    }
+
+    /// The streaming path exists so a body never has to be held whole, but a
+    /// non-2xx used to drain all of it before throwing — so an unbounded error
+    /// page was materialised in full on exactly the path meant to prevent that.
+    @Test("a huge error body is truncated rather than held whole")
+    func errorBodyIsCappedAtTheConfiguredLimit() async {
+        let url = URL(string: "https://stub.test/stream/huge-error")!
+        let huge = Data(repeating: 0x62, count: 2_000_000)
+        StubURLProtocol.register(.http(status: 500, chunks: [huge]), for: url)
+
+        var transport = makeStubbedTransport()
+        transport.maxErrorBodyBytes = 4096
+        do {
+            for try await _ in transport.stream(HTTPRequest(method: "GET", url: url)) {
+                Issue.record("2xx 以外ではチャンクが yield されないべき")
+            }
+            Issue.record("エラーがスローされるべき")
+        } catch let error as HTTPStatusError {
+            #expect(error.status == 500)
+            #expect(error.body.count == 4096)
+        } catch {
+            Issue.record("HTTPStatusError を期待したが \(error) だった")
+        }
+    }
+
+    @Test("an error body under the cap still arrives whole")
+    func errorBodyUnderTheCapIsNotTruncated() async {
+        let url = URL(string: "https://stub.test/stream/small-error")!
+        StubURLProtocol.register(.http(status: 400, chunks: [Data("bad request".utf8)]), for: url)
+        var transport = makeStubbedTransport()
+        transport.maxErrorBodyBytes = 4096
+        do {
+            for try await _ in transport.stream(HTTPRequest(method: "GET", url: url)) {}
+            Issue.record("エラーがスローされるべき")
+        } catch let error as HTTPStatusError {
+            #expect(String(decoding: error.body, as: UTF8.self) == "bad request")
+        } catch {
+            Issue.record("HTTPStatusError を期待したが \(error) だった")
+        }
+    }
+
+    @Test("a large success body still streams in chunks rather than being buffered")
+    func largeSuccessBodyArrivesInManyChunks() async throws {
+        let url = URL(string: "https://stub.test/stream/large-success")!
+        let body = Data(repeating: 0x63, count: 200_000)
+        StubURLProtocol.register(.http(status: 200, chunks: [body]), for: url)
+        var collected = Data()
+        var chunkCount = 0
+        var largest = 0
+        for try await chunk in makeStubbedTransport().stream(HTTPRequest(method: "GET", url: url)) {
+            collected.append(chunk)
+            chunkCount += 1
+            largest = max(largest, chunk.count)
+        }
+        #expect(collected == body)
+        #expect(chunkCount >= 48)
+        #expect(largest <= 4096)
     }
 
     @Test
