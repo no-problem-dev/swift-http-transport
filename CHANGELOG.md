@@ -5,6 +5,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Builds and tests on Linux. `URLSession` lives in `FoundationNetworking` there, and
+  corelibs-foundation has no `URLSession.bytes(for:)` — streaming is rebuilt on the
+  `URLSessionDataDelegate` callbacks it does provide, so the streaming conformance is intact
+  rather than gated away. The buffer drains in fixed slices to match the chunking Apple's
+  byte-wise loop produces.
+
+
 ## [1.1.2] - 2026-07-30
 
 ### Fixed
