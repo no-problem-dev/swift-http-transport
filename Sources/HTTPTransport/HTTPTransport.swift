@@ -1,4 +1,10 @@
 import Foundation
+#if canImport(FoundationNetworking)
+// On Linux the URL loading system ships as a module of its own rather than as
+// part of Foundation, so `URLSession`, `URLRequest` and `HTTPURLResponse` are
+// only in scope once this is imported.
+import FoundationNetworking
+#endif
 
 /// The one seam through which a request is sent and a whole response awaited.
 ///
@@ -88,6 +94,16 @@ public struct URLSessionTransport: HTTPTransport, HTTPStreamingTransport {
 
     public func stream(_ request: HTTPRequest) -> AsyncThrowingStream<Data, Error> {
         let urlRequest = makeURLRequest(request)
+        #if canImport(FoundationNetworking)
+        return streamViaDelegate(urlRequest)
+        #else
+        return streamViaAsyncBytes(urlRequest)
+        #endif
+    }
+
+    #if !canImport(FoundationNetworking)
+    /// Streams through `URLSession.AsyncBytes`, which only Apple's Foundation provides.
+    private func streamViaAsyncBytes(_ urlRequest: URLRequest) -> AsyncThrowingStream<Data, Error> {
         let session = self.session
         return AsyncThrowingStream { continuation in
             let task = Task {
@@ -102,7 +118,10 @@ public struct URLSessionTransport: HTTPTransport, HTTPStreamingTransport {
                     var buffer = Data()
                     for try await byte in bytes {
                         buffer.append(byte)
-                        if buffer.count >= 4096 { continuation.yield(buffer); buffer.removeAll(keepingCapacity: true) }
+                        if buffer.count >= Self.chunkSize {
+                            continuation.yield(buffer)
+                            buffer.removeAll(keepingCapacity: true)
+                        }
                     }
                     if !buffer.isEmpty { continuation.yield(buffer) }
                     continuation.finish()
@@ -119,6 +138,7 @@ public struct URLSessionTransport: HTTPTransport, HTTPStreamingTransport {
             continuation.onTermination = { _ in task.cancel() }
         }
     }
+    #endif
 
     private func makeURLRequest(_ request: HTTPRequest) -> URLRequest {
         var urlRequest = URLRequest(url: request.url)
@@ -131,13 +151,36 @@ public struct URLSessionTransport: HTTPTransport, HTTPStreamingTransport {
         return urlRequest
     }
 
-    private static func headers(from http: HTTPURLResponse) -> HTTPHeaders {
+    fileprivate static func headers(from http: HTTPURLResponse) -> HTTPHeaders {
         var headers = HTTPHeaders()
         for (key, value) in http.allHeaderFields {
             if let name = key as? String, let value = value as? String { headers[name] = value }
         }
         return headers
     }
+
+    /// How much body is gathered before a chunk is handed to the caller.
+    fileprivate static let chunkSize = 4096
+
+    #if canImport(FoundationNetworking)
+    /// Streams through the URL loading system's delegate callbacks.
+    ///
+    /// swift-corelibs-foundation has no `URLSession.bytes(for:)`, so the delivery
+    /// the Apple path gets from `AsyncBytes` is rebuilt on the callbacks it does
+    /// provide. The session is rebuilt from this transport's configuration
+    /// because a delegate can only be attached when a session is created, so any
+    /// `URLProtocol` stub or caching policy on the original still applies.
+    private func streamViaDelegate(_ urlRequest: URLRequest) -> AsyncThrowingStream<Data, Error> {
+        let configuration = session.configuration
+        return AsyncThrowingStream { continuation in
+            let delegate = StreamingSessionDelegate(continuation: continuation)
+            let session = URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
+            let task = session.dataTask(with: urlRequest)
+            continuation.onTermination = { _ in task.cancel() }
+            task.resume()
+        }
+    }
+    #endif
 }
 
 /// The failure a stream reports when the server answered with a non-2xx status.
@@ -150,3 +193,94 @@ public struct HTTPStatusError: Error, Sendable {
     public let headers: HTTPHeaders
     public let body: Data
 }
+
+#if canImport(FoundationNetworking)
+/// Carries one streamed request on platforms whose `URLSession` lacks `bytes(for:)`.
+///
+/// The observable contract matches the Apple path exactly: body arrives in
+/// chunks of roughly ``URLSessionTransport/chunkSize``, a non-2xx status drains
+/// the whole error body before failing with ``HTTPStatusError``, a reply that is
+/// not HTTP fails with ``TransportError/invalidResponse``, and cancelling the
+/// surrounding task surfaces as ``TransportError/cancelled``.
+///
+/// State is reached from the delegate queue and from `onTermination`, so it is
+/// guarded by a lock rather than by an actor — the delegate methods are
+/// synchronous and cannot await isolation.
+private final class StreamingSessionDelegate: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+    private let continuation: AsyncThrowingStream<Data, Error>.Continuation
+    private let lock = NSLock()
+    private var status: Int?
+    private var headers = HTTPHeaders()
+    private var buffer = Data()
+    private var isSuccess = true
+
+    init(continuation: AsyncThrowingStream<Data, Error>.Continuation) {
+        self.continuation = continuation
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        dataTask: URLSessionDataTask,
+        didReceive response: URLResponse,
+        completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
+    ) {
+        guard let http = response as? HTTPURLResponse else {
+            continuation.finish(throwing: TransportError.invalidResponse)
+            completionHandler(.cancel)
+            return
+        }
+        lock.withLock {
+            status = http.statusCode
+            headers = URLSessionTransport.headers(from: http)
+            isSuccess = (200..<300).contains(http.statusCode)
+        }
+        completionHandler(.allow)
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        // The buffer is drained in fixed slices rather than handed over whole, so
+        // that one large delegate callback still arrives as the same sequence of
+        // roughly-4 KB chunks the byte-wise Apple path produces.
+        //
+        // An error body is held back instead, so it can travel whole inside
+        // HTTPStatusError, which is why only the success path drains here.
+        let chunks: [Data] = lock.withLock {
+            buffer.append(data)
+            guard isSuccess else { return [] }
+            var chunks: [Data] = []
+            while buffer.count >= URLSessionTransport.chunkSize {
+                chunks.append(Data(buffer.prefix(URLSessionTransport.chunkSize)))
+                buffer.removeFirst(URLSessionTransport.chunkSize)
+            }
+            return chunks
+        }
+        for chunk in chunks { continuation.yield(chunk) }
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: (any Error)?) {
+        defer { session.finishTasksAndInvalidate() }
+
+        if let error {
+            let isCancellation = (error as? URLError)?.code == .cancelled
+            continuation.finish(throwing: isCancellation ? .cancelled : TransportError.network(error))
+            return
+        }
+
+        let (remaining, succeeded, finalStatus, finalHeaders) = lock.withLock {
+            (buffer, isSuccess, status, headers)
+        }
+        guard let finalStatus else {
+            continuation.finish(throwing: TransportError.invalidResponse)
+            return
+        }
+        guard succeeded else {
+            continuation.finish(
+                throwing: HTTPStatusError(status: finalStatus, headers: finalHeaders, body: remaining)
+            )
+            return
+        }
+        if !remaining.isEmpty { continuation.yield(remaining) }
+        continuation.finish()
+    }
+}
+#endif

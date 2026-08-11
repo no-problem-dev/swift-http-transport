@@ -49,7 +49,7 @@ covered in the documentation.
 
 ## Requirements
 
-Swift 6.2 · iOS 17 · macOS 14 · tvOS 17 · watchOS 10 · visionOS 1
+Swift 6.2 · iOS 17 · macOS 14 · tvOS 17 · watchOS 10 · visionOS 1 · Linux
 
 ## Installation
 
