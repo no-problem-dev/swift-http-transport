@@ -18,6 +18,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `data:` lines keep their newlines: several `data:` lines join with `\n`, and an empty one still
   counts as a line. Neither was pinned before.
 
+### Fixed
+
+- `scripts/compute-next-version.sh` counted a defaulted parameter as a removal. A USR carries the
+  argument labels, so adding `b:` with a default rewrites it and reads as remove-plus-add — major,
+  for a change no caller has to touch. It now cancels those out by comparing declarations with the
+  defaulted parameter dropped, and leaves a real signature change alone (a changed type, a required
+  parameter, a deleted function all still count). This release would have been 3.0.0 otherwise.
+  Two `sed` patterns in that script also relied on `\t`, which BSD `sed` does not read as a tab;
+  the USR prefix survived and the comparison silently compared the wrong strings.
+
 ## [2.1.0] - 2026-08-11
 
 ### Added

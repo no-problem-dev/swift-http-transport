@@ -156,8 +156,43 @@ fi
 # baseline が取れなかった場合は、上の分岐が既に値を決めている。ここで測り直すと
 # 空ファイルとの比較になって removed=0 added=<全件> になり、宣言を握り潰す。
 if [ "${BASELINE_UNBUILDABLE:-false}" != true ]; then
-  REMOVED=$(comm -23 "$WORK/baseline.api" "$WORK/head.api" | wc -l | tr -d ' ')
-  ADDED=$(comm -13 "$WORK/baseline.api" "$WORK/head.api" | wc -l | tr -d ' ')
+  comm -23 "$WORK/baseline.api" "$WORK/head.api" > "$WORK/removed"
+  comm -13 "$WORK/baseline.api" "$WORK/head.api" > "$WORK/added"
+
+  # 既定値付き引数の追加を削除と読まないための相殺。
+  #
+  # USR には引数ラベルが載るので、`f(a:)` に `b:` を既定値付きで足すと USR が変わり、
+  # 「削除 1 + 追加 1」に見える。だが呼び出し側は 1 文字も直らない —
+  # 既存の呼び出しはそのままコンパイルできるので、SemVer 上これは追加であって破壊ではない。
+  #
+  # 判定は宣言文字列で行う。追加側から「既定値付きの引数」を丸ごと落とした形が
+  # 削除側の宣言と一致するなら、増えたのはその引数だけ。既定値だけを消すのでは
+  # 引数が残って一致しないので、`, ラベル: 型 = 値` の単位で落とす。
+  # 名前・他の引数・戻り値が変わっていれば一致しないので、本物の変更は落ちない。
+  #
+  # 実例: sseEvents に onRawFrame を既定値付きで足した回。呼び出しは無変更で通るのに
+  # major と算出され、被依存側に不要な世代上げを強いるところだった。
+  # この環境の sed はパターン内の \t をタブとして読まない（BSD sed）。
+  # 読まれないと USR の前置が残り、宣言だけの比較にならず相殺が静かに効かなくなる。
+  # 実タブを変数に入れて渡す。
+  TAB="$(printf '\t')"
+  strip_defaults() {
+    sed -E 's/, [A-Za-z_][A-Za-z0-9_]*: [^=]+ = [^,)]+//g' "$1" \
+      | cut -d"$TAB" -f2- | sort -u
+  }
+  if [ -s "$WORK/removed" ] && [ -s "$WORK/added" ]; then
+    strip_defaults "$WORK/added" > "$WORK/added.nodefault"
+    cut -d"$TAB" -f2- "$WORK/removed" | sort -u > "$WORK/removed.decl"
+    comm -23 "$WORK/removed.decl" "$WORK/added.nodefault" > "$WORK/removed.real"
+    SOFTENED=$(( $(wc -l < "$WORK/removed.decl") - $(wc -l < "$WORK/removed.real") ))
+    if [ "$SOFTENED" -gt 0 ]; then
+      echo "注記: 既定値付き引数の追加 ${SOFTENED} 件を削除として数えない（呼び出しは無変更で通る）" >&2
+      cp "$WORK/removed.real" "$WORK/removed"
+    fi
+  fi
+
+  REMOVED=$(wc -l < "$WORK/removed" | tr -d ' ')
+  ADDED=$(wc -l < "$WORK/added" | tr -d ' ')
 fi
 
 # --- public dependency の世代変化を見る（シンボル差分に映らない破壊的変更） ---
