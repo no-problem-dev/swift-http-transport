@@ -5,6 +5,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.1] - 2026-08-24
+
 ### Fixed
 
 - The defaulted-argument cancellation added in 2.2.0 was too greedy: it dropped *every* defaulted
