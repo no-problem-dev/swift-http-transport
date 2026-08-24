@@ -345,4 +345,20 @@ struct SSETests {
         let last = parser.finish()
         #expect(last?.data == "tail")
     }
+
+    @Test("data 行の中の改行は畳まれずに残る")
+    func multipleDataLinesKeepTheirNewline() {
+        var parser = SSEParser()
+        let events = parser.consume(Data("data: one\ndata: two\n\n".utf8))
+        #expect(events.count == 1)
+        #expect(events[0].data == "one\ntwo")
+    }
+
+    @Test("空の data 行も 1 行として数える")
+    func emptyDataLineIsKept() {
+        var parser = SSEParser()
+        let events = parser.consume(Data("data: one\ndata: \n\n".utf8))
+        #expect(events.count == 1)
+        #expect(events[0].data == "one\n")
+    }
 }

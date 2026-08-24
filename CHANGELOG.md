@@ -5,6 +5,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `sseEvents(_:onRawFrame:)` hands over each chunk before parsing. Parsing is lossy in exactly the
+  way that matters when the question is *what did the server actually send*: the bytes inside a
+  `data:` line, and where one chunk ended, are both gone by the time a frame is decoded. Chasing a
+  trailing newline in a model's streamed text had no way to tell one the model wrote from one the
+  transport's own framing implied. Omitting the closure keeps the previous behaviour.
+
+### Tested
+
+- `data:` lines keep their newlines: several `data:` lines join with `\n`, and an empty one still
+  counts as a line. Neither was pinned before.
+
 ## [2.1.0] - 2026-08-11
 
 ### Added

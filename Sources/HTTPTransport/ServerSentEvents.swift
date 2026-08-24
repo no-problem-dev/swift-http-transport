@@ -139,16 +139,25 @@ extension HTTPStreamingTransport {
     /// unchanged, including ``HTTPStatusError`` for a non-2xx status. Ending
     /// this stream cancels the underlying request.
     ///
-    /// - Parameter request: The request to send. Set `Accept` to
-    ///   `text/event-stream` yourself; nothing is added here.
+    /// - Parameters:
+    ///   - request: The request to send. Set `Accept` to `text/event-stream`
+    ///     yourself; nothing is added here.
+    ///   - onRawFrame: Hands over each chunk as it arrives, before parsing.
+    ///     Parsing absorbs what you need to see when the question is *what did
+    ///     the server actually send* — the bytes inside a `data:` line, and
+    ///     where one chunk ended. Omit it and nothing is called.
     /// - Returns: A stream of decoded frames.
-    public func sseEvents(_ request: HTTPRequest) -> AsyncThrowingStream<SSEEvent, Error> {
+    public func sseEvents(
+        _ request: HTTPRequest,
+        onRawFrame: (@Sendable (Data) -> Void)? = nil
+    ) -> AsyncThrowingStream<SSEEvent, Error> {
         let byteStream = stream(request)
         return AsyncThrowingStream { continuation in
             let task = Task {
                 var parser = SSEParser()
                 do {
                     for try await chunk in byteStream {
+                        onRawFrame?(chunk)
                         for event in parser.consume(chunk) { continuation.yield(event) }
                     }
                     if let last = parser.finish() { continuation.yield(last) }
