@@ -5,6 +5,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The defaulted-argument cancellation added in 2.2.0 was too greedy: it dropped *every* defaulted
+  parameter before comparing, so a declaration that already had several lost them all. That made a
+  real break able to match the stripped form and be cancelled — computing minor where major was
+  right, which is the more dangerous direction of the two. It now peels one defaulted parameter
+  off the end at a time and looks for the baseline among those intermediate forms. Two depth-
+  counting traps are handled: `->` whose `>` is not a closing bracket, and a parameter list whose
+  `)` is not the last one in the declaration. Pinned by `scripts/lib/test-strip-defaulted-args.sh`,
+  nine cases, weighted toward the ones that must *not* cancel.
+
 ## [2.2.0] - 2026-08-24
 
 ### Added
