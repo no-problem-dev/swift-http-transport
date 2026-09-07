@@ -89,7 +89,7 @@ private func makeStubbedTransport(defaultTimeout: TimeInterval = 60) -> URLSessi
 
 /// Waits until the stub has actually started loading, so a cancellation lands
 /// on a request that is in flight rather than on one not yet begun.
-private func waitUntilRequestStarted(_ url: URL) async {
+func waitUntilRequestStarted(_ url: URL) async {
     for _ in 0 ..< 400 {
         if StubURLProtocol.received(for: url) != nil { return }
         try? await Task.sleep(nanoseconds: 5_000_000)

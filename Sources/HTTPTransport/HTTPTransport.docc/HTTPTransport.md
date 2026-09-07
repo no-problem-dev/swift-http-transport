@@ -15,8 +15,10 @@ Two rules are worth knowing before the first call:
 - An HTTP status is not an error. ``HTTPTransport/send(_:)`` returns 4xx and 5xx
   as ordinary responses; check ``HTTPResponse/isSuccess``. Only failures that
   stop a response forming throw ``TransportError``.
-- ``HTTPStreamingTransport/stream(_:)`` is the exception: a non-2xx status fails
-  the stream with ``HTTPStatusError`` and no chunk is ever yielded.
+- ``HTTPStreamingTransport/stream(_:)`` and
+  ``HTTPDownloadTransport/download(_:to:onProgress:)`` are the exceptions: a
+  non-2xx status fails them with ``HTTPStatusError``, and neither a chunk nor a
+  file is ever produced.
 
 ## Getting started
 
@@ -42,7 +44,7 @@ unchanged whatever its method, so weigh that before retrying writes.
 
 ### Read an event stream
 
-``HTTPStreamingTransport/sseEvents(_:)`` decodes frames as they arrive,
+``HTTPStreamingTransport/sseEvents(_:onRawFrame:)`` decodes frames as they arrive,
 absorbing chunk boundaries and CRLF line endings.
 
 ```swift
@@ -59,6 +61,38 @@ for try await event in URLSessionTransport().sseEvents(request) {
 ```
 
 Leaving the loop cancels the underlying request.
+
+### Put a body on disk
+
+``HTTPDownloadTransport/download(_:to:onProgress:)`` writes the body straight to
+a file. Nothing reaches the destination until every byte has arrived, so a
+failure never leaves a truncated file behind.
+
+```swift
+let file = try await URLSessionTransport().download(
+    HTTPRequest(method: "GET", url: url),
+    to: cachesDirectory.appendingPathComponent("track.flac"),
+    onProgress: { progress in
+        await MainActor.run { fraction = progress.fraction ?? 0 }
+    }
+)
+print(file.byteCount, file.headers.contentRange as Any)
+```
+
+A transfer that stops hands back a ``DownloadResumption`` inside the thrown
+``DownloadInterruption``, when the server left continuing possible:
+
+```swift
+do {
+    return try await transport.download(request, to: destination)
+} catch let stopped as DownloadInterruption {
+    guard let resumption = stopped.resumption else { throw stopped }
+    return try await transport.download(continuing: resumption)
+}
+```
+
+Cancelling the surrounding task is the same thing as pausing: the request stops
+and the resumption comes back in the thrown interruption.
 
 ### Test without a network
 
@@ -90,6 +124,7 @@ Injecting `sleep` runs the backoff schedule without real delay.
 
 - ``HTTPTransport``
 - ``HTTPStreamingTransport``
+- ``HTTPDownloadTransport``
 
 ### Concrete transports
 
@@ -108,6 +143,14 @@ Injecting `sleep` runs the backoff schedule without real delay.
 
 - ``RateLimitHeaderMapping``
 - ``RateLimitSnapshot``
+
+### Downloads
+
+- ``DownloadedFile``
+- ``DownloadProgress``
+- ``DownloadResumption``
+- ``DownloadInterruption``
+- ``ContentRange``
 
 ### Server-sent events
 

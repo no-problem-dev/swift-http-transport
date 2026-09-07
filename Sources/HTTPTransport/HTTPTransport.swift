@@ -68,14 +68,15 @@ public struct URLSessionTransport: HTTPTransport, HTTPStreamingTransport {
     /// it without ever timing out.
     public var defaultTimeout: TimeInterval
 
-    /// How much of a non-2xx body ``stream(_:)`` will hold before giving up on
-    /// the rest.
+    /// How much of a non-2xx body ``stream(_:)`` and the download paths will
+    /// hold before giving up on the rest.
     ///
     /// A streamed error still has to be collected to be reported, and a server
     /// under load can answer with an error page of any size at all. Past this
     /// many bytes the request is cancelled and ``HTTPStatusError/body`` carries
     /// the truncated prefix, so a stream can never be turned into an unbounded
-    /// allocation by the far end.
+    /// allocation by the far end. A download reads the same bound off the front
+    /// of the error payload it was answered with, for the same reason.
     public var maxErrorBodyBytes = 64 * 1024
 
     /// Creates a transport over the given session.
@@ -109,7 +110,7 @@ public struct URLSessionTransport: HTTPTransport, HTTPStreamingTransport {
     /// `CancellationError` therefore left ``TransportError/cancelled``
     /// unreachable and handed callers a `URLError -999` wrapped in
     /// ``TransportError/network(_:)`` instead.
-    fileprivate static func transportError(from error: any Error) -> TransportError {
+    static func transportError(from error: any Error) -> TransportError {
         if error is CancellationError { return .cancelled }
         if let urlError = error as? URLError, urlError.code == .cancelled { return .cancelled }
         return .network(error)
@@ -140,7 +141,7 @@ public struct URLSessionTransport: HTTPTransport, HTTPStreamingTransport {
         }
     }
 
-    private func makeURLRequest(_ request: HTTPRequest) -> URLRequest {
+    func makeURLRequest(_ request: HTTPRequest) -> URLRequest {
         var urlRequest = URLRequest(url: request.url)
         urlRequest.httpMethod = request.method
         urlRequest.httpBody = request.body
@@ -151,7 +152,7 @@ public struct URLSessionTransport: HTTPTransport, HTTPStreamingTransport {
         return urlRequest
     }
 
-    fileprivate static func headers(from http: HTTPURLResponse) -> HTTPHeaders {
+    static func headers(from http: HTTPURLResponse) -> HTTPHeaders {
         var headers = HTTPHeaders()
         for (key, value) in http.allHeaderFields {
             if let name = key as? String, let value = value as? String { headers[name] = value }

@@ -121,9 +121,28 @@ public final class MockTransport: HTTPTransport, HTTPStreamingTransport, @unchec
         if let handler {
             do { return .response(try handler(request)) } catch { return .failure(error) }
         }
+        return nextScriptedOutcome()
+    }
+
+    /// Takes the next scripted answer, or an empty 200 once the script has run
+    /// out. Call holding `lock`.
+    private func nextScriptedOutcome() -> Outcome {
         guard !scripted.isEmpty else {
             return .response(HTTPResponse(status: 200, headers: [:], body: Data()))
         }
         return scripted.removeFirst()
+    }
+
+    /// Draws the next answer for a call made elsewhere in the module.
+    ///
+    /// Takes the lock itself, unlike ``nextOutcome(for:)``. Passing `nil`
+    /// records nothing and draws from the script alone — that is the shape of a
+    /// download continuation, which carries no ``HTTPRequest`` because the URL
+    /// loading system's resume data hides it.
+    func outcome(recording request: HTTPRequest?) -> Outcome {
+        lock.withLock {
+            guard let request else { return nextScriptedOutcome() }
+            return nextOutcome(for: request)
+        }
     }
 }

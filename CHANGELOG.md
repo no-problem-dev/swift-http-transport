@@ -5,6 +5,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `HTTPDownloadTransport`, the third seam beside `HTTPTransport` and `HTTPStreamingTransport`. It
+  writes a response body to a file rather than into memory — which the other two cannot do, since
+  `send(_:)` buffers by contract and `stream(_:)` leaves writing, counting, and cleaning up after a
+  failure to every caller in turn. Nothing reaches the destination until the body has arrived
+  whole, so a failure never leaves a truncated file behind. `URLSessionTransport` implements it on
+  `URLSessionDownloadTask`; `MockTransport` implements it from the same script it already answers
+  `send(_:)` from, so a caller's download code is testable without a network.
+- Progress arrives through an `onProgress` closure taking a `DownloadProgress`, rather than through
+  a stream of events. A download's result is a file, not a sequence, and a stream cannot hand back
+  resume data once its consumer has stopped consuming — which is exactly the moment a pause
+  produces it. `expected` is optional rather than a sentinel: a chunked response genuinely has no
+  total, and a progress bar that cannot be drawn should become a spinner rather than be drawn wrong.
+- `DownloadInterruption` carries a `DownloadResumption` when the server left continuing possible,
+  and cancelling the surrounding task is the same thing as pausing — the request stops and the
+  resumption comes back in the thrown interruption. Continuing takes the resumption and nothing
+  else: the URL loading system's resume data already contains the original request, so passing one
+  beside it would only let the two contradict each other. On Linux this is always `nil`;
+  swift-corelibs-foundation compiles the whole resume path and implements none of it, so a resume
+  loop written against this degrades to starting over there rather than failing.
+- `HTTPHeaders.contentLength` and `HTTPHeaders.contentRange`, the latter parsing all three shapes
+  RFC 9110 §14.4 allows into a `ContentRange`. Range requests could already be *sent*; there was
+  nothing to read the answer with. These sit on `HTTPHeaders` rather than on the download result,
+  so they are reachable from an `HTTPResponse` and an `HTTPStatusError` too.
+- `.github/workflows/tests.yml`, restoring the test gate removed in 2.2.0's workflow sync. The
+  cost of not having it is on record: `agent-runtime` 0.18.0 was tagged with tests that did not
+  compile, because a warm local `.build` answered green. Three packages are about to be changed;
+  a gate that has never run cannot say whether the changes held.
+
+### Fixed
+
+- The DocC landing page linked `sseEvents(_:)`, which has not been the symbol's name since 2.2.0
+  added `onRawFrame:` to it. The generated page dropped the link silently and the build warned
+  where nobody was reading.
+
+### Tested
+
+- Twenty-one cases for the download path. The file lands with the right bytes, missing parent
+  directories are created and a stale file replaced, progress never decreases and ends at the size
+  that actually landed, a total the server withheld reads as `nil` rather than as `-1`,
+  `Content-Range` comes back parsed from a 206, and a non-2xx, a network failure, a cancellation,
+  and an unwritable destination each leave nothing at all at the destination.
+- Nine of those are Apple-only, and the reason is worth writing down rather than working around: a
+  custom `URLProtocol` cannot answer a download task on Linux. corelibs hands the delegate
+  `urlProtocol.properties[.temporaryFileURL] as! URL`, and that property is set in exactly one
+  place — its own internal `NativeProtocol`. The force-unwrap kills the process rather than failing
+  a test. Real downloads there go through `NativeProtocol` and are unaffected; what cannot be
+  reproduced on Linux is the stub, not the feature.
+- The resume seam is pinned where it is reachable. A `URLProtocol` stub never mints resume data,
+  so the extraction from a failure's `userInfo` is tested directly — including that the key is
+  spelled `NSURLSessionDownloadTaskResumeData` on Darwin and `URLSessionDownloadTaskResumeData` on
+  Linux, for the same string. Naming either one unguarded is a compile error on the other side.
+
 ## [2.2.1] - 2026-08-24
 
 ### Fixed
