@@ -156,41 +156,8 @@ fi
 # baseline が取れなかった場合は、上の分岐が既に値を決めている。ここで測り直すと
 # 空ファイルとの比較になって removed=0 added=<全件> になり、宣言を握り潰す。
 if [ "${BASELINE_UNBUILDABLE:-false}" != true ]; then
-  comm -23 "$WORK/baseline.api" "$WORK/head.api" > "$WORK/removed"
-  comm -13 "$WORK/baseline.api" "$WORK/head.api" > "$WORK/added"
-
-  # 既定値付き引数の追加を削除と読まないための相殺。
-  #
-  # USR には引数ラベルが載るので、`f(a:)` に `b:` を既定値付きで足すと USR が変わり、
-  # 「削除 1 + 追加 1」に見える。だが呼び出し側は 1 文字も直らない —
-  # 既存の呼び出しはそのままコンパイルできるので、SemVer 上これは追加であって破壊ではない。
-  #
-  # 判定は宣言文字列で行う。追加側から**末尾の**既定値付き引数を 1 つずつ落とし、
-  # その途中の形が削除側と一致するなら、増えたのはその引数だけ。
-  #
-  # 「既定値付きの引数を全部落として比べる」ではいけない。既存の既定値付き引数まで
-  # 消えるので、本物の破壊が「全部落とした形」と偶然一致すると相殺してしまう
-  # （major を minor と算出する = 当初の誤りより危険な向きの誤り）。
-  # 落とすのは末尾から 1 つずつに限る。
-  #
-  # 深さの数え方に罠が 2 つある。`->` の `>` を閉じ括弧と数えると深さが狂う。
-  # 引数リストの `)` は「最後の )」ではない（戻り値に `)` が出る）。
-  # どちらも strip-defaulted-args.py 側で処理する。9 通りで確認済み。
-  TAB="$(printf '\t')"
-  if [ -s "$WORK/removed" ] && [ -s "$WORK/added" ]; then
-    cut -d"$TAB" -f2- "$WORK/added" | sort -u \
-      | python3 "$(dirname "$0")/lib/strip-defaulted-args.py" | sort -u > "$WORK/added.peeled"
-    cut -d"$TAB" -f2- "$WORK/removed" | sort -u > "$WORK/removed.decl"
-    comm -23 "$WORK/removed.decl" "$WORK/added.peeled" > "$WORK/removed.real"
-    SOFTENED=$(( $(wc -l < "$WORK/removed.decl") - $(wc -l < "$WORK/removed.real") ))
-    if [ "$SOFTENED" -gt 0 ]; then
-      echo "注記: 既定値付き引数の追加 ${SOFTENED} 件を削除として数えない（呼び出しは無変更で通る）" >&2
-      cp "$WORK/removed.real" "$WORK/removed"
-    fi
-  fi
-
-  REMOVED=$(wc -l < "$WORK/removed" | tr -d ' ')
-  ADDED=$(wc -l < "$WORK/added" | tr -d ' ')
+  REMOVED=$(comm -23 "$WORK/baseline.api" "$WORK/head.api" | wc -l | tr -d ' ')
+  ADDED=$(comm -13 "$WORK/baseline.api" "$WORK/head.api" | wc -l | tr -d ' ')
 fi
 
 # --- public dependency の世代変化を見る（シンボル差分に映らない破壊的変更） ---
