@@ -73,7 +73,7 @@ covered in the documentation.
 
 ## Documentation
 
-[API reference and guides](https://no-problem-dev.github.io/swift-http-transport/documentation/httptransport)
+[API reference and guides](Sources/HTTPTransport/HTTPTransport.docc)
 
 ## Requirements
 
