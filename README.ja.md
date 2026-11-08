@@ -69,7 +69,7 @@ do {
 
 ## ドキュメント
 
-[API リファレンスとガイド](https://no-problem-dev.github.io/swift-http-transport/documentation/httptransport)
+[API リファレンスとガイド](Sources/HTTPTransport/HTTPTransport.docc)
 
 ## 動作環境
 
